@@ -1,0 +1,29 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# browser profile — contains your Catawiki session cookies
+.browser-profile/
+.browser-profile.lock
+*.lock
+
+# runtime
+.venv/
+__pycache__/
+*.pyc
+logs/
+*.log
+
+# data never goes in the repo
+*.csv
+*.json
+*.parquet
+*.sqlite
+ids.txt
+
+# old versions
+*_old.py
+
+.DS_Store
+probe-output/
