@@ -1,8 +1,8 @@
-# watchflip
+# Watchflip
 
 **Can you predict what a vintage watch will sell for at auction — well enough to buy below value and resell at a profit?**
 
-watchflip monitors Catawiki auctions of vintage Omega watches (men's and unisex, 1950–1989), predicts each lot's closing price with a calibrated uncertainty band, estimates what the watch would resell for, and sends a short list of lots worth bidding on to Telegram. A human looks at the photos and places the bid. There is no auto-bidding.
+Watchflip monitors Catawiki auctions of vintage Omega watches (men's and unisex, 1950–1989), predicts each lot's closing price with a calibrated uncertainty band, estimates what the watch would resell for, and sends a short list of lots worth bidding on to Telegram. A human looks at the photos and places the bid. There is no auto-bidding.
 
 It is a research project first. The most useful results are the ones that said *no*.
 
