@@ -209,7 +209,10 @@ def featurise(df: pd.DataFrame) -> pd.DataFrame:
 
     f["bid_count"] = df["bid_count"]
     f["snapshots"] = df["snapshots"]
-    f["bid_24h"] = df["bid_24h"]
+    # A bid of 0 means "no bids yet", not "worth nothing". Treated as missing,
+    # so the lot falls into the no-late-bid regime (listing-based, wider band)
+    # instead of being predicted to close near zero.
+    f["bid_24h"] = df["bid_24h"].where(df["bid_24h"] > 0)
     f["no_reserve"] = df["title"].fillna("").str.lower() \
                         .str.contains("no reserve").astype(int)
 
@@ -232,7 +235,7 @@ def featurise(df: pd.DataFrame) -> pd.DataFrame:
     for name, rx in FLAG_RES.items():
         f[name] = text.map(lambda t, rx=rx: int(bool(rx.search(t))))
 
-    f["late_bid"] = df["late_bid"]
+    f["late_bid"] = df["late_bid"].where(df["late_bid"] > 0)
 
     return f
 

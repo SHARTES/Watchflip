@@ -551,7 +551,7 @@ def score() -> tuple[pd.DataFrame, dict]:
             flags.append("non-EU +20% VAT")
         if country == "unknown":
             flags.append("country unknown")
-        if pd.isna(lot["late_bid"]):
+        if pd.isna(lot["late_bid"]) or lot["late_bid"] <= 0:
             flags.append("no late bid")
         if kind == "line":
             flags.append("line-level value")
@@ -582,7 +582,7 @@ def score() -> tuple[pd.DataFrame, dict]:
             "condition": str(lot["watch_condition"]).split(" - ")[0]
                          if isinstance(lot["watch_condition"], str) else "",
             "country": country,
-            "has_late_bid": pd.notna(lot["late_bid"]),
+            "has_late_bid": pd.notna(lot["late_bid"]) and lot["late_bid"] > 0,
             "seen_at": lot.get("last_seen"),
             "serviced": bool(model.FLAG_RES["serviced"].search(
                 f"{lot['title'] or ''} {lot['description'] or ''}")),
