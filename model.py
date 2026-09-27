@@ -189,6 +189,26 @@ def target_mask(df: pd.DataFrame) -> np.ndarray:
     return (brand & era & gender).to_numpy()
 
 
+# No-reserve lots open at €1 and most bidding happens in the final hour, so a
+# bid of €6 an hour before close means "bidding has not started", not "worth
+# €6". Below this share of the model line's typical price, a bid is treated as
+# missing: the lot moves to the no-late-bid regime, priced from the listing,
+# with the wider band that regime is calibrated to.
+ACTIVE_BID_SHARE = 0.15
+
+
+def active_bid(df: pd.DataFrame, col: str) -> pd.Series:
+    bid = pd.to_numeric(df[col], errors="coerce")
+    if "final_price" in df:
+        price = pd.to_numeric(df["final_price"], errors="coerce")
+        line = df["watch_model"].astype(str).str.lower()
+        typical = price.groupby(line).transform("median").fillna(price.median())
+    else:
+        typical = pd.Series(np.nan, index=df.index)
+    floor = (ACTIVE_BID_SHARE * typical).fillna(0).clip(lower=1.0)
+    return bid.where(bid >= floor)
+
+
 def featurise(df: pd.DataFrame) -> pd.DataFrame:
     f = pd.DataFrame(index=df.index)
 
@@ -209,10 +229,7 @@ def featurise(df: pd.DataFrame) -> pd.DataFrame:
 
     f["bid_count"] = df["bid_count"]
     f["snapshots"] = df["snapshots"]
-    # A bid of 0 means "no bids yet", not "worth nothing". Treated as missing,
-    # so the lot falls into the no-late-bid regime (listing-based, wider band)
-    # instead of being predicted to close near zero.
-    f["bid_24h"] = df["bid_24h"].where(df["bid_24h"] > 0)
+    f["bid_24h"] = active_bid(df, "bid_24h")
     f["no_reserve"] = df["title"].fillna("").str.lower() \
                         .str.contains("no reserve").astype(int)
 
@@ -235,7 +252,7 @@ def featurise(df: pd.DataFrame) -> pd.DataFrame:
     for name, rx in FLAG_RES.items():
         f[name] = text.map(lambda t, rx=rx: int(bool(rx.search(t))))
 
-    f["late_bid"] = df["late_bid"].where(df["late_bid"] > 0)
+    f["late_bid"] = active_bid(df, "late_bid")
 
     return f
 

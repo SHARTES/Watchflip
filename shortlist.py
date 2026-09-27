@@ -551,8 +551,9 @@ def score() -> tuple[pd.DataFrame, dict]:
             flags.append("non-EU +20% VAT")
         if country == "unknown":
             flags.append("country unknown")
-        if pd.isna(lot["late_bid"]) or lot["late_bid"] <= 0:
-            flags.append("no late bid")
+        active_late = pd.notna(X_open.loc[idx, "late_bid"])
+        if not active_late:
+            flags.append("no late bid" if pd.isna(lot["late_bid"]) else "bidding not started")
         if kind == "line":
             flags.append("line-level value")
         if kind == "feature":
@@ -582,7 +583,7 @@ def score() -> tuple[pd.DataFrame, dict]:
             "condition": str(lot["watch_condition"]).split(" - ")[0]
                          if isinstance(lot["watch_condition"], str) else "",
             "country": country,
-            "has_late_bid": pd.notna(lot["late_bid"]) and lot["late_bid"] > 0,
+            "has_late_bid": active_late,
             "seen_at": lot.get("last_seen"),
             "serviced": bool(model.FLAG_RES["serviced"].search(
                 f"{lot['title'] or ''} {lot['description'] or ''}")),
@@ -722,7 +723,8 @@ def message(r) -> str:
     if r["country"] == "unknown":
         warn.append("Seller country unknown — VAT may apply on top")
     if not r["has_late_bid"]:
-        warn.append("No recent bid seen, so the chance is less reliable")
+        warn.append("Bidding has barely started, so the likely price is estimated from "
+                    "the listing and the chance is less reliable")
     warn.append("Look at the dial, hands and case in every photo — "
                 "damage is often not in the description")
     out.append("")
