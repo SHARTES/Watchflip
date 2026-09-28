@@ -55,6 +55,11 @@ MIN_REF_LISTINGS = 3      # cleaned eBay listings needed to trust a reference
 TARGET_MARGIN = 0.25      # required profit over landed cost
 OUTBOUND_SHIPPING = 15.0  # insured shipping to your buyer
 WARRANTY_RESERVE = 0.05   # share of each sale set aside for returns and repairs
+# What the selling platform takes. 0.07 = Chrono24 as a private seller; eBay.at
+# is about 0.11; Willhaben, Instagram or forums are ~0 (PayPal goods & services
+# ~3%). Set it to the channel you actually sell through — trade.py will show
+# the real figure once you have sales.
+SALE_FEE = 0.07
 IMPORT_VAT = 0.20         # Austrian import VAT on goods from outside the EU
 
 MIN_WIN_PROB = 0.20       # below this, a lot is not worth your attention
@@ -335,7 +340,7 @@ def max_bid(value: float, realism: float, non_eu: bool,
             margin: float = TARGET_MARGIN) -> tuple[float, float]:
     """Highest hammer that still clears the margin, capped by the budget."""
     sale = value * realism
-    net_sale = sale * (1 - WARRANTY_RESERVE) - OUTBOUND_SHIPPING
+    net_sale = sale * (1 - WARRANTY_RESERVE - SALE_FEE) - OUTBOUND_SHIPPING
     vat = 1 + (IMPORT_VAT if non_eu else 0)
     by_margin = (net_sale / (1 + margin) / vat - fixed_in()) / fee_mult()
     by_budget = (cfg.max_all_in_cost / vat - fixed_in()) / fee_mult()
@@ -640,7 +645,7 @@ def breakdown(r) -> str:
     """One line showing where the profit number comes from."""
     sale = r["value"] * r["realism"]
     return (f"value €{r['value']:.0f} × {r['realism']:.0%} = sell €{sale:.0f} → "
-            f"net €{r['net_sale']:.0f} after reserve + shipping · "
+            f"net €{r['net_sale']:.0f} after fees, reserve + shipping · "
             f"max bid €{r['max_bid']:.0f} keeps {margin_for(r['kind']):.0%} margin")
 
 
@@ -701,7 +706,7 @@ def message(r) -> str:
     vat = " + 20% import VAT" if non_eu else ""
     out.append(f"You pay {_eur(r['landed_at_max'])} all-in (fees + shipping{vat})")
     out.append(f"You sell for about {_eur(sale)} → {_eur(r['net_sale'])} after "
-               f"shipping and a returns reserve")
+               f"{SALE_FEE:.0%} platform fee, shipping and a returns reserve")
     out.append(f"Profit about <b>{_eur(r['profit_at_max'])}</b> ({margin:.0%})")
     if r["p50"] < r["max_bid"] * 0.95:
         out.append(f"At the likely {_eur(r['p50'])}: about "

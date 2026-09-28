@@ -74,7 +74,8 @@ def flags_for(row, lot_material: str, median: float) -> list[str]:
 def cost_chain(value: float, realism: float, margin: float, non_eu: bool, bid: float | None):
     sale = value * realism
     reserve = sale * sl.WARRANTY_RESERVE
-    net = sale - reserve - sl.OUTBOUND_SHIPPING
+    fee = sale * sl.SALE_FEE
+    net = sale - reserve - fee - sl.OUTBOUND_SHIPPING
     ceiling, _ = sl.max_bid(value, realism, non_eu, margin)
 
     def row(label, amount):
@@ -82,6 +83,7 @@ def cost_chain(value: float, realism: float, margin: float, non_eu: bool, bid: f
 
     row("value (what it fetches, as listed)", f"€{value:,.0f}")
     row(f"× {realism:.0%} you realistically get", f"€{sale:,.0f}")
+    row(f"− {sl.SALE_FEE:.0%} platform fee", f"−€{fee:,.0f}")
     row(f"− {sl.WARRANTY_RESERVE:.0%} warranty/return reserve", f"−€{reserve:,.0f}")
     row("− outbound insured shipping", f"−€{sl.OUTBOUND_SHIPPING:,.0f}")
     row("= net from the sale", f"€{net:,.0f}")
