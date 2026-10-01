@@ -76,7 +76,7 @@ def funnel(sold: pd.DataFrame) -> None:
     cw = sl.catawiki_by_ref(sold)
     k = t["reference_number"].map(model.ref_key)
     has_ebay = t.apply(lambda lot: sl.ebay_value(lot, by_ref) is not None, axis=1)
-    has_cw = k.map(lambda x: x in cw.index and cw.loc[x, "count"] >= sl.MIN_REF_SALES)
+    has_cw = t.apply(lambda lot: sl.catawiki_value(lot, cw) is not None, axis=1)
     evidence = has_ebay | has_cw
 
     base = t[afford & t["cond_ok"]]
@@ -187,6 +187,7 @@ def replay(train, test, pred, fair, te_b, live):
     cw_train = sl.catawiki_by_ref(train)
     sl.calibrate_ratio(train, by_ref)
     sl.calibrate_feature_bias(live, by_ref)
+    sl.calibrate_margin(train, by_ref, cw_train)
     tm = model.target_mask(te_b)
 
     rows = []
@@ -200,6 +201,7 @@ def replay(train, test, pred, fair, te_b, live):
         non_eu = sl.eu_status(lot["seller_country"]) == "non_eu"
         p20, p50, p80 = (float(pred.loc[idx, c]) for c in ("p20", "p50", "p80"))
         rows.append({"lot_id": lot["lot_id"], "idx": idx, "kind": kind, "value": value,
+                     "sigma": getattr(v, "sigma", np.nan),
                      "non_eu": non_eu, "current": float(lot["late_bid"]),
                      "final": float(lot["final_price"]), "p20": p20, "p50": p50, "p80": p80,
                      "fair": float(fair.get(idx, np.nan)), "line": sl.line_of(lot["watch_model"]),
@@ -209,10 +211,17 @@ def replay(train, test, pred, fair, te_b, live):
     return df
 
 
-def evaluate(df, realism_by_kind):
+def evaluate(df, realism_by_kind, rule: str = "fixed"):
+    """rule 'fixed': the margins in SETTINGS. rule 'uncertainty': margin from
+    how sure each value is (shortlist.margin_for), the live default."""
     out = []
     for _, r in df.iterrows():
         realism, margin = realism_by_kind[r["kind"]]
+        if rule == "uncertainty":
+            keep = sl.USE_UNCERTAINTY_MARGIN
+            sl.USE_UNCERTAINTY_MARGIN = True
+            margin = sl.margin_for(r["kind"], r.get("sigma"), center=margin)
+            sl.USE_UNCERTAINTY_MARGIN = keep
         ceiling, net = sl.max_bid(r["value"], realism, r["non_eu"], margin)
         p_win = sl.p_under(ceiling, r["p20"], r["p50"], r["p80"]) if ceiling > r["current"] else 0.0
         flagged = ceiling > r["current"] and p_win >= sl.MIN_WIN_PROB
@@ -248,6 +257,27 @@ def report_replay(df, days):
               f"{prof}{per}{int((w['profit'] < 0).sum()):>8}")
     print("   'expected' = wins the model predicted; close to 'won' means honest odds.")
     print("   Feature-tier profit is the model agreeing with itself — treat it as a lead count.\n")
+
+    # Which margin rule? Same lots, same model — only the required margin differs.
+    # The stress columns re-run each rule as if every resale came in 15% below
+    # the estimate: a good rule should lose less there, not just win more.
+    print("   margin rule, evidence-valued lots:")
+    print(f"   {'rule':<14}{'avg margin':>11}{'won':>6}{'profit':>9}{'losers':>8}"
+          f"{'stress profit':>15}{'stress losers':>15}")
+    evid = df[df["kind"] != "feature"]
+    stressed = {k: (r * 0.85, m) for k, (r, m) in SETTINGS.items()}
+    for rule in ("fixed", "uncertainty"):
+        e = evaluate(evid, SETTINGS, rule)
+        st = evaluate(evid, stressed, rule)
+        w, ws = e[e["won"]], st[st["won"]]
+        avg_m = (e["ceiling"].notna()).sum() and (
+            evid.apply(lambda r: sl.margin_for(r["kind"], r.get("sigma"), center=SETTINGS[r["kind"]][1])
+                       if rule == "uncertainty" else SETTINGS[r["kind"]][1], axis=1).mean())
+        print(f"   {rule:<14}{avg_m:>11.0%}{len(w):>6}{w['profit'].sum():>9.0f}"
+              f"{int((w['profit'] < 0).sum()):>8}{ws['profit'].sum():>15.0f}"
+              f"{int((ws['profit'] < 0).sum()):>15}")
+    print("   Prefer the rule with more profit in BOTH columns; if they split, the")
+    print("   stress column matters more until real sales confirm the resale level.\n")
 
     both = ev[ev["kind"] != "feature"].dropna(subset=["fair"])
     if len(both):

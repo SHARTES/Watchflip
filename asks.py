@@ -36,6 +36,15 @@ GOLD_VARIANT_RE = re.compile(
     r"|stahl\s?/\s?gold|steel\s?/\s?gold|gold\s?/\s?stahl|zweifarbig|bicolou?r|two[\s-]?tone"
     r"|diamant|diamond|brillant",
     re.I)
+# Case material named in a listing title. Plated is checked first because
+# "SS GP" (steel back, gold-plated case) is a plated watch.
+PLATED_LISTING_RE = re.compile(
+    r"gold[\s-]?plated|vergoldet|goldplatt|plaqu|doubl[ée]|gold[\s-]?filled|"
+    r"rolled gold|gold[\s-]?capped|\bG\.?P\b", re.I)
+STEEL_LISTING_RE = re.compile(r"edelstahl|stainless|\bsteel\b|\bstahl\b|\bacier\b|"
+                              r"acciaio|\binox\b", re.I)
+STEEL_SS_RE = re.compile(r"\bSS\b")          # upper-case only: "SS" = stainless steel
+
 SERVICED_RE = re.compile(r"servic|revidiert|revision|überholt|warranty|garantie", re.I)
 
 # Relative to the median of what is left. The low bound only catches
@@ -66,18 +75,45 @@ def listing_flags(title, currency) -> list[str]:
 
 
 def lot_material(lot) -> str:
-    return model.material(f"{lot.get('title') or ''} {lot.get('description') or ''}")
+    return model.lot_material(lot)
+
+
+def listing_material(title) -> str:
+    t = str(title or "")
+    if PLATED_LISTING_RE.search(t):
+        return "plated"
+    if GOLD_VARIANT_RE.search(t):
+        return "gold"            # solid gold, two-tone or diamond-set
+    if STEEL_LISTING_RE.search(t) or STEEL_SS_RE.search(t):
+        return "steel"
+    if re.search(r"\bgold\b|\bgolden\b", t, re.I):
+        return "goldtone"        # "Gold Dress Watch": gold-coloured, karat not stated
+    return "unknown"
+
+
+def mismatch(title, lot_mat: str) -> str | None:
+    """Why a listing of this title is not comparable to a lot of this material."""
+    lm = listing_material(title)
+    if lm == "goldtone":
+        # Gold-coloured without a karat stamp is usually plated: comparable to a
+        # plated or gold lot, never to a steel one.
+        return "gold-coloured, yours is steel" if lot_mat == "steel" else None
+    if lm == "unknown" or lot_mat == lm:
+        return None
+    if lot_mat in ("unknown", "other"):
+        # Material of the lot is not known: only keep out the pricier gold variants.
+        return "gold/two-tone, yours may not be" if lm == "gold" else None
+    if lot_mat == "bicolor":
+        return None if lm == "gold" else f"{lm}, yours is two-tone"
+    return f"{lm}, yours is {lot_mat}"
 
 
 def usable(listings: pd.DataFrame, material: str) -> pd.Series:
     """Which listings count for a lot of this material (outliers handled later)."""
     parts = listings["title"].fillna("").map(lambda t: bool(PARTS_RE.search(t)))
     other_ccy = listings["currency"].fillna("EUR").str.upper() != "EUR"
-    gold = listings["title"].fillna("").map(lambda t: bool(GOLD_VARIANT_RE.search(t)))
-    keep = ~parts & ~other_ccy
-    if material != "gold":
-        keep &= ~gold
-    return keep
+    wrong = listings["title"].fillna("").map(lambda t: mismatch(t, material) is not None)
+    return ~parts & ~other_ccy & ~wrong
 
 
 def drop_outliers(prices: pd.Series) -> pd.Series:
@@ -111,6 +147,18 @@ def value(listings: pd.DataFrame, material: str) -> tuple[float, int] | None:
     if prices.empty:
         return None
     return float(np.quantile(prices, VALUE_QUANTILE)), int(len(prices))
+
+
+def value_stats(listings: pd.DataFrame, material: str) -> tuple[float, int, float] | None:
+    """(lower-quarter ask, listings used, spread) — spread is the standard
+    deviation of the log prices, i.e. how much comparable asks disagree."""
+    if listings is None or listings.empty:
+        return None
+    prices = counted(listings, material)
+    if prices.empty:
+        return None
+    sd = float(np.std(np.log(prices.to_numpy(float)), ddof=1)) if len(prices) > 1 else 0.5
+    return float(np.quantile(prices, VALUE_QUANTILE)), int(len(prices)), sd
 
 
 def load() -> dict[str, pd.DataFrame]:

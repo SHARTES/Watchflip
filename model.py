@@ -100,6 +100,14 @@ select
     l.reference_number, l.watch_period, l.watch_year, l.watch_condition,
     l.movement, l.case_diameter_mm, l.photo_count, l.seller_country, l.seller_name,
     l.estimate_low, l.estimate_high, l.close_time,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Case material").value') #>> '{}' as case_material,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Repainted dial").value') #>> '{}' as repainted_dial,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original box included").value') #>> '{}' as box_spec,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original papers included").value') #>> '{}' as papers_spec,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original warranty included").value') #>> '{}' as warranty_spec,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Band material").value') #>> '{}' as band_material,
+    l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,reviewCount}' as seller_reviews,
+    l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,ratingValue}' as seller_rating,
     r.final_price, r.bid_count,
     (select count(*) from bid_snapshots s where s.lot_id = l.lot_id) as snapshots,
     (select s.current_bid from bid_snapshots s
@@ -149,6 +157,30 @@ def period_midpoint(period) -> float | None:
         return None
     years = [int(y) for y in PERIOD_RE.findall(period)]
     return sum(years) / len(years) if years else None
+
+
+def case_material(value) -> str | None:
+    """Map Catawiki's own "Case material" field to steel / plated / gold / bicolor."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    v = value.lower()
+    if re.search(r"plat|fill|capp|plaqu|doubl", v):
+        return "plated"
+    if "gold" in v and re.search(r"steel|stahl|/", v):
+        return "bicolor"
+    if "gold" in v:
+        return "gold"
+    if re.search(r"steel|stahl|acier|inox", v):
+        return "steel"
+    return "other"
+
+
+def lot_material(lot) -> str:
+    """Catawiki's case-material field when present, else read from the text."""
+    m = case_material(lot.get("case_material")) if hasattr(lot, "get") else None
+    if m:
+        return m
+    return material(f"{lot.get('title') or ''} {lot.get('description') or ''}")
 
 
 def material(text: str) -> str:
@@ -244,6 +276,9 @@ def featurise(df: pd.DataFrame) -> pd.DataFrame:
     # ---- v2 additions ----------------------------------------------------
     text = (df["title"].fillna("") + " " + df["description"].fillna(""))
     mat = text.map(material)
+    if "case_material" in df:
+        field = df["case_material"].map(case_material)
+        mat = field.where(field.notna(), mat)
     f["mat_gold"] = (mat == "gold").astype(int)
     f["mat_plated"] = (mat == "plated").astype(int)
     f["mat_steel"] = (mat == "steel").astype(int)
@@ -251,6 +286,25 @@ def featurise(df: pd.DataFrame) -> pd.DataFrame:
 
     for name, rx in FLAG_RES.items():
         f[name] = text.map(lambda t, rx=rx: int(bool(rx.search(t))))
+
+    # Catawiki's own specification fields, when the stored page data has them.
+    # These never change during an auction, so using them cannot leak the result.
+    def yes_no(col):
+        if col not in df:
+            return pd.Series(np.nan, index=df.index)
+        v = df[col].astype(str).str.strip().str.lower()
+        return v.map({"yes": 1.0, "no": 0.0})
+    f["repainted"] = yes_no("repainted_dial")
+    f["has_box"] = np.fmax(f["has_box"], yes_no("box_spec").fillna(0))
+    f["has_papers"] = np.fmax(f["has_papers"], yes_no("papers_spec").fillna(0))
+    f["warranty_card"] = yes_no("warranty_spec")
+    if "band_material" in df:
+        band = df["band_material"].astype(str).str.lower()
+        f["bracelet"] = np.where(band.str.contains("steel|metal|gold|bracelet|titan"), 1.0,
+                                 np.where(band.str.contains("leather|textile|rubber|nato"), 0.0, np.nan))
+    if "seller_reviews" in df:
+        f["seller_reviews"] = np.log1p(pd.to_numeric(df["seller_reviews"], errors="coerce"))
+        f["seller_rating"] = pd.to_numeric(df["seller_rating"], errors="coerce")
 
     f["late_bid"] = active_bid(df, "late_bid")
 

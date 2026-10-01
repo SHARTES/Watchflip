@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 
 import db
+import demand
 import re
 from config import cfg
 from fetcher import fetcher
@@ -82,6 +83,7 @@ def is_within_purchase_budget(rec: dict) -> bool:
 
 
 def _snapshot(conn, lot_id, rec, close_time) -> None:
+    demand.record(conn, lot_id, rec, close_time)
     db.insert_snapshot(
         conn,
         lot_id=lot_id,

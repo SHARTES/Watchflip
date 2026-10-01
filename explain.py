@@ -60,11 +60,11 @@ def ebay_link(comp_id: str) -> str:
 
 
 def flags_for(row, lot_material: str, median: float) -> list[str]:
-    f = asks.listing_flags(row.get("title"), row.get("currency"))
-    if "gold/two-tone" in f and lot_material != "gold":
-        f[f.index("gold/two-tone")] = "gold/two-tone, yours isn't"
-    elif "gold/two-tone" in f:
-        f.remove("gold/two-tone")
+    f = [x for x in asks.listing_flags(row.get("title"), row.get("currency"))
+         if x != "gold/two-tone"]
+    why = asks.mismatch(row.get("title"), lot_material)
+    if why:
+        f.append(why)
     if median and (row["price"] > asks.OUTLIER_HIGH * median
                    or row["price"] < asks.OUTLIER_LOW * median):
         f.append("outlier")
@@ -110,7 +110,7 @@ def main(arg: str) -> None:
     r = lot.iloc[0]
     key = model.ref_key(r["reference_number"])
     text = f"{r['title'] or ''} {r['description'] or ''}"
-    material = model.material(text)
+    material = model.lot_material(r)
     non_eu = sl.eu_status(r["seller_country"]) == "non_eu"
 
     print(f"{r['title']}")
@@ -172,6 +172,7 @@ def main(arg: str) -> None:
     by_ref, by_line = sl.load_asks({})
     cw = sl.catawiki_by_ref(closed[closed["lot_id"] != lot_id])
     sl.calibrate_ratio(closed[closed["lot_id"] != lot_id], by_ref)
+    sl.calibrate_margin(closed[closed["lot_id"] != lot_id], by_ref, cw)
     fair = None
     v = sl.value_for(r, by_ref, by_line, cw)
     if v is None and sl.USE_FEATURE_TIER:
@@ -184,9 +185,14 @@ def main(arg: str) -> None:
         print("3. No value — the shortlist skips this lot.")
         return
     value, realism, basis, kind = v
-    margin = sl.margin_for(kind)
+    sigma = getattr(v, "sigma", None)
+    margin = sl.margin_for(kind, sigma)
     print(f"3. Value used: €{value:.0f} from {basis}")
-    if kind == "ebay":
+    if kind == "ebay" and "combined" in basis:
+        print("   = geometric mean of the two: the eBay value (lower quarter of comparable")
+        print(f"     asks) and comparable Catawiki sales × {sl.ASK_TO_HAMMER:.2f} "
+              f"(the measured eBay-to-auction ratio)")
+    elif kind == "ebay":
         print(f"   = lower quarter of the counted eBay asks (the raw median would be "
               f"€{asks_df['price'].median():.0f})")
     if kind == "catawiki":
@@ -197,6 +203,10 @@ def main(arg: str) -> None:
               f" ÷ {sl.FEAT_BIAS:.2f}")
         print(f"   ({sl.ratio_text()};")
         print(f"    {sl.bias_text()})")
+    if sigma is not None:
+        ref = sl.SIGMA_REF.get("evidence")
+        typ = f" (typical ±{ref:.0%})" if ref is not None and kind != "feature" else ""
+        print(f"   uncertainty of this value: ±{sigma:.0%}{typ} → required margin {margin:.0%}")
     print()
 
     # 4. cost chain

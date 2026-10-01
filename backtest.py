@@ -75,6 +75,7 @@ def replay() -> tuple[pd.DataFrame, dict]:
     cw_train = sl.catawiki_by_ref(train)
     sl.calibrate_ratio(train, by_ref)
     sl.calibrate_feature_bias(live, by_ref)
+    sl.calibrate_margin(train, by_ref, cw_train)
 
     tm = model.target_mask(test_b)
     info = {"start": start, "end": end, "train": len(train),
@@ -103,7 +104,8 @@ def replay() -> tuple[pd.DataFrame, dict]:
         value, realism, _, basis = v
 
         non_eu = sl.eu_status(lot["seller_country"]) == "non_eu"
-        ceiling, net_sale = sl.max_bid(value, realism, non_eu, sl.margin_for(basis))
+        ceiling, net_sale = sl.max_bid(value, realism, non_eu,
+                                       sl.margin_for(basis, getattr(v, "sigma", None)))
         current = float(lot["late_bid"])
         final = float(lot["final_price"])
 

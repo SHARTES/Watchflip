@@ -52,7 +52,21 @@ REALISM_REF = REALISM_EBAY  # Catawiki tier: same scale as eBay since the ratio 
 REALISM_LINE = 0.75       # the same, when only a line-level ask is available
 MIN_REF_LISTINGS = 3      # cleaned eBay listings needed to trust a reference
 
-TARGET_MARGIN = 0.25      # required profit over landed cost
+TARGET_MARGIN = 0.25      # required profit over landed cost (fixed rule)
+
+# Margin from uncertainty. Each value carries σ — how unsure it is, in log
+# terms: few or scattered comparables, eBay and Catawiki disagreeing. The
+# required margin is moved around the usual level by that uncertainty:
+#     margin = usual margin + MARGIN_PER_SIGMA × (σ − typical σ)
+# "Typical σ" is measured on past evidence-valued lots each run, so on
+# average the agent is exactly as cautious as before — it just spends that
+# caution where the evidence is thin and bids more freely where it is solid.
+# analyze.py compares this with the fixed margins on past auctions.
+USE_UNCERTAINTY_MARGIN = True
+MARGIN_PER_SIGMA = 1.0
+MARGIN_MIN, MARGIN_MAX = 0.15, 0.45
+SIGMA_REF = {"evidence": None}   # set by calibrate_margin()
+SIGMA_FLOOR = 0.05        # even many tight comparables are asks, not sales
 OUTBOUND_SHIPPING = 15.0  # insured shipping to your buyer
 WARRANTY_RESERVE = 0.05   # share of each sale set aside for returns and repairs
 # What the selling platform takes. 0.07 = Chrono24 as a private seller; eBay.at
@@ -78,6 +92,10 @@ MIN_CONDITION = 3         # 3 = 'Good'; Fair and Poor are filtered out
 MIN_REF_SALES = 2         # earlier Catawiki sales needed to trust a reference
 ASK_TO_HAMMER = 1.20      # fallback only, used if too few references to measure
 MIN_RATIO_REFS = 8        # references needed before the measured ratio is used
+# When a reference has both eBay listings and Catawiki sales, use the geometric
+# mean of the two. Asking prices drift above what watches really fetch, and a
+# handful of auction results is noisy; together they are steadier than either.
+BLEND_EVIDENCE = True
 RATIO_INFO = {"ratio": ASK_TO_HAMMER, "refs": 0, "lots": 0, "measured": False}
 
 # The line-level fallback values an ordinary watch as if it were a typical
@@ -170,14 +188,44 @@ def passes_filters(lot) -> bool:
     k = model.ref_key(lot["reference_number"])
     if k and k in {model.ref_key(r) for r in EXCLUDE_REFS}:
         return False
+    if str(lot.get("repainted_dial") or "").strip().lower() == "yes":
+        return False             # a redial is worth a fraction of an original
     return True
 
 
 def catawiki_by_ref(closed: pd.DataFrame) -> pd.DataFrame:
-    """Median Catawiki price per reference, from lots that already sold."""
+    """Catawiki sales per reference, from lots that already sold.
+
+    Keeps each sale's price and case material, so a plated lot is compared
+    with plated (or unstated) sales of its reference, not with steel ones.
+    """
     c = closed.assign(k=closed["reference_number"].map(model.ref_key))
     c = c.dropna(subset=["k"])
-    return c.groupby("k")["final_price"].agg(["median", "count"])
+    if c.empty:
+        return pd.DataFrame(columns=["median", "count", "sales"])
+    c = c.assign(mat=c.apply(model.lot_material, axis=1))
+    out = c.groupby("k")["final_price"].agg(["median", "count"])
+    out["sales"] = c.groupby("k").apply(
+        lambda g: list(zip(g["final_price"].astype(float), g["mat"])))
+    return out
+
+
+def catawiki_value(lot, cw_by_ref, with_spread: bool = False):
+    """(median Catawiki price of comparable sales, how many[, log spread]) or None."""
+    k = model.ref_key(lot["reference_number"])
+    if not k or k not in cw_by_ref.index:
+        return None
+    mat = model.lot_material(lot)
+    sales = cw_by_ref.loc[k, "sales"]
+    if mat in ("steel", "plated", "gold", "bicolor"):
+        sales = [(p, m) for p, m in sales if m in (mat, "unknown", "other")]
+    if len(sales) < MIN_REF_SALES:
+        return None
+    prices = np.array([p for p, _ in sales], float)
+    if not with_spread:
+        return float(np.median(prices)), len(sales)
+    sd = float(np.std(np.log(prices), ddof=1)) if len(prices) > 1 else 0.5
+    return float(np.median(prices)), len(sales), sd
 
 
 def ebay_value(lot, by_ref) -> tuple[float, int] | None:
@@ -215,7 +263,9 @@ def calibrate_ratio(closed: pd.DataFrame, by_ref) -> dict:
             # Spread across references, to show how much one number hides.
             info.update(ratio=ASK_TO_HAMMER, measured=True,
                         p25=float(math.exp(per_ref.quantile(0.25))),
-                        p75=float(math.exp(per_ref.quantile(0.75))))
+                        p75=float(math.exp(per_ref.quantile(0.75))),
+                        # robust spread of the per-reference ratio (IQR / 1.349)
+                        sigma=float((per_ref.quantile(0.75) - per_ref.quantile(0.25)) / 1.349))
     RATIO_INFO.clear()
     RATIO_INFO.update(info)
     return info
@@ -242,7 +292,9 @@ def calibrate_feature_bias(live, by_ref) -> dict:
     info = {"bias": FEAT_BIAS, "lots": len(lr), "measured": False}
     if len(lr) >= MIN_BIAS_LOTS:
         FEAT_BIAS = max(1.0, float(math.exp(np.median(lr))))
-        info.update(bias=FEAT_BIAS, measured=True, raw=float(math.exp(np.median(lr))))
+        q75, q25 = np.percentile(lr, [75, 25])
+        info.update(bias=FEAT_BIAS, measured=True, raw=float(math.exp(np.median(lr))),
+                    sigma=float((q75 - q25) / 1.349))
     BIAS_INFO.clear()
     BIAS_INFO.update(info)
     return info
@@ -267,6 +319,25 @@ def ratio_text() -> str:
             f"references / {i['lots']} lots (middle half {i['p25']:.2f}–{i['p75']:.2f})")
 
 
+class Value(tuple):
+    """(value, realism, basis, kind) — unpacks like before — plus .sigma."""
+    sigma: float | None = None
+
+
+def _value(value, realism, basis, kind, sigma):
+    v = Value((value, realism, basis, kind))
+    v.sigma = float(sigma) if sigma is not None else None
+    return v
+
+
+def ebay_stats(lot, by_ref) -> tuple[float, int, float] | None:
+    k = model.ref_key(lot["reference_number"])
+    if not k or k not in by_ref:
+        return None
+    v = asks.value_stats(by_ref[k], asks.lot_material(lot))
+    return v if v is not None and v[1] >= MIN_REF_LISTINGS else None
+
+
 def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
     """Expected resale for one lot, from the most specific evidence available.
 
@@ -278,22 +349,36 @@ def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
 
     `fair` is the listing-only model's typical Catawiki price for this lot.
     """
-    k = model.ref_key(lot["reference_number"])
-    ev = ebay_value(lot, by_ref)
-    if ev is not None:
-        v, n = ev
-        return v, REALISM_EBAY, f"the cheaper quarter of {n} eBay listings", "ebay"
-    if k and k in cw_by_ref.index and cw_by_ref.loc[k, "count"] >= MIN_REF_SALES:
-        n = int(cw_by_ref.loc[k, "count"])
-        value = float(cw_by_ref.loc[k, "median"]) * ASK_TO_HAMMER
-        return value, REALISM_REF, f"{n} Catawiki sales", "catawiki"
+    es = ebay_stats(lot, by_ref)
+    cw = catawiki_value(lot, cw_by_ref, with_spread=True)
+    s_ratio = RATIO_INFO.get("sigma", 0.20)
+    if es is not None:
+        ve, n, sd_e = es
+        sig_e = math.sqrt(sd_e ** 2 / n + SIGMA_FLOOR ** 2)
+    if cw is not None:
+        vc, m, sd_c = cw[0] * ASK_TO_HAMMER, cw[1], cw[2]
+        # Converting auction prices to eBay level adds the ratio's own spread.
+        sig_c = math.sqrt(sd_c ** 2 / m + s_ratio ** 2)
+    if es is not None and cw is not None and BLEND_EVIDENCE:
+        d = abs(math.log(ve / vc))
+        # Averaging two sources halves the noise, unless they disagree more
+        # than their noise explains — then the disagreement is the uncertainty.
+        sig = max(0.5 * math.sqrt(sig_e ** 2 + sig_c ** 2), d / 2)
+        return _value(math.sqrt(ve * vc), REALISM_EBAY,
+                      f"eBay €{ve:.0f} ({n} listings) and Catawiki €{vc:.0f} ({m} sales), combined",
+                      "ebay", sig)
+    if es is not None:
+        return _value(ve, REALISM_EBAY, f"the cheaper quarter of {n} eBay listings", "ebay", sig_e)
+    if cw is not None:
+        return _value(vc, REALISM_REF, f"{m} Catawiki sales", "catawiki", sig_c)
     if USE_FEATURE_TIER and fair is not None and np.isfinite(fair) and fair > 0:
-        return (float(fair) * ASK_TO_HAMMER / FEAT_BIAS, REALISM_FEAT,
-                f"similar lots, which typically fetch €{fair:.0f} at auction", "feature")
+        return _value(float(fair) * ASK_TO_HAMMER / FEAT_BIAS, REALISM_FEAT,
+                      f"similar lots, which typically fetch €{fair:.0f} at auction", "feature",
+                      BIAS_INFO.get("sigma", 0.20))
     if USE_LINE_FALLBACK:
         line = line_of(lot["watch_model"])
         if line in by_line:
-            return float(by_line[line]), REALISM_LINE, f"{line} line value", "line"
+            return _value(float(by_line[line]), REALISM_LINE, f"{line} line value", "line", 0.35)
     return None
 
 
@@ -332,8 +417,28 @@ def landed(bid: float, non_eu: bool) -> float:
     return (bid * fee_mult() + fixed_in()) * vat
 
 
-def margin_for(kind: str) -> float:
-    return FEAT_MARGIN if kind == "feature" else TARGET_MARGIN
+def margin_for(kind: str, sigma: float | None = None, center: float | None = None) -> float:
+    usual = center if center is not None else (FEAT_MARGIN if kind == "feature" else TARGET_MARGIN)
+    ref = SIGMA_REF.get("evidence")
+    if (not USE_UNCERTAINTY_MARGIN or kind == "feature" or sigma is None
+            or not np.isfinite(sigma) or ref is None):
+        return usual
+    return float(np.clip(usual + MARGIN_PER_SIGMA * (sigma - ref), MARGIN_MIN, MARGIN_MAX))
+
+
+def calibrate_margin(closed: pd.DataFrame, by_ref, cw_by_ref) -> float | None:
+    """Typical uncertainty of evidence-based values, measured on sold lots.
+    Call after calibrate_ratio(). Pass training lots only when replaying."""
+    t = closed[model.target_mask(closed)]
+    sig = []
+    for _, lot in t.iterrows():
+        if not passes_filters(lot):
+            continue
+        v = value_for(lot, by_ref, {}, cw_by_ref, None)
+        if v is not None and v[3] in ("ebay", "catawiki") and v.sigma is not None:
+            sig.append(v.sigma)
+    SIGMA_REF["evidence"] = float(np.median(sig)) if len(sig) >= 10 else None
+    return SIGMA_REF["evidence"]
 
 
 def max_bid(value: float, realism: float, non_eu: bool,
@@ -369,6 +474,14 @@ select
     l.reference_number, l.watch_period, l.watch_year, l.watch_condition,
     l.movement, l.case_diameter_mm, l.photo_count, l.seller_country, l.seller_name,
     l.estimate_low, l.estimate_high, l.close_time,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Case material").value') #>> '{}' as case_material,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Repainted dial").value') #>> '{}' as repainted_dial,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original box included").value') #>> '{}' as box_spec,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original papers included").value') #>> '{}' as papers_spec,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original warranty included").value') #>> '{}' as warranty_spec,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Band material").value') #>> '{}' as band_material,
+    l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,reviewCount}' as seller_reviews,
+    l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,ratingValue}' as seller_rating,
     (select s.bid_count from bid_snapshots s where s.lot_id = l.lot_id
      order by s.observed_at desc limit 1) as bid_count,
     (select count(*) from bid_snapshots s where s.lot_id = l.lot_id) as snapshots,
@@ -513,6 +626,7 @@ def score() -> tuple[pd.DataFrame, dict]:
     cw_by_ref = catawiki_by_ref(closed)
     calibrate_ratio(closed, by_ref)
     calibrate_feature_bias(live, by_ref)
+    calibrate_margin(closed, by_ref, cw_by_ref)
 
     tm = model.target_mask(open_b)
     stats["target"] = int(tm.sum())
@@ -535,7 +649,8 @@ def score() -> tuple[pd.DataFrame, dict]:
 
         country = eu_status(lot["seller_country"])
         non_eu = country == "non_eu"
-        ceiling, net_sale = max_bid(value, realism, non_eu, margin_for(kind))
+        margin = margin_for(kind, getattr(v, "sigma", None))
+        ceiling, net_sale = max_bid(value, realism, non_eu, margin)
 
         current = float(lot["current_bid"]) if pd.notna(lot["current_bid"]) else 0.0
         if ceiling <= current:
@@ -581,6 +696,7 @@ def score() -> tuple[pd.DataFrame, dict]:
             "url": lot["url"],
             "compare": ebay_search(lot["reference_number"]),
             "realism": realism, "net_sale": net_sale, "kind": kind,
+            "margin": margin, "sigma": getattr(v, "sigma", None),
             "profit_at_max": net_sale - landed(ceiling, non_eu),
             "landed_at_max": landed(ceiling, non_eu),
             "close_time": lot["close_time"],
@@ -616,6 +732,9 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
         print(f"calibrated on the last {CAL_DAYS} days ({', '.join(parts)})")
     print(ratio_text())
     print(bias_text())
+    if SIGMA_REF.get("evidence") is not None and USE_UNCERTAINTY_MARGIN:
+        print(f"margin from uncertainty: {TARGET_MARGIN:.0%} at the typical ±"
+              f"{SIGMA_REF['evidence']:.0%}, from {MARGIN_MIN:.0%} to {MARGIN_MAX:.0%}")
     print()
 
     if out.empty:
@@ -646,7 +765,8 @@ def breakdown(r) -> str:
     sale = r["value"] * r["realism"]
     return (f"value €{r['value']:.0f} × {r['realism']:.0%} = sell €{sale:.0f} → "
             f"net €{r['net_sale']:.0f} after fees, reserve + shipping · "
-            f"max bid €{r['max_bid']:.0f} keeps {margin_for(r['kind']):.0%} margin")
+            f"max bid €{r['max_bid']:.0f} keeps {r['margin']:.0%} margin"
+            + (f" (uncertainty ±{r['sigma']:.0%})" if r.get("sigma") is not None else ""))
 
 
 EVIDENCE = {
