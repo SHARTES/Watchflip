@@ -217,7 +217,9 @@ def monitor(limit: int | None = None) -> None:
         log.info("nothing due for monitoring")
         return
 
-    log.info("%d lots due, nearest closes in %.1f h", len(due), due[0]["hours_left"])
+    log.info("%d lots due (%d yours, %d candidate brands), nearest closes in %.1f h",
+             len(due), sum(r.get("tier") == 0 for r in due), sum(r.get("tier") == 1 for r in due),
+             min(float(r["hours_left"]) for r in due))
     if len(due) >= limit:
         log.warning(
             "the ladder is saturated at %d lots — snapshots are being skipped; "

@@ -48,7 +48,9 @@ log = logging.getLogger("comps")
 # they are still informative, long enough not to burn the daily allowance.
 REFRESH_DAYS = 4
 
-MAX_QUERIES_PER_RUN = 60
+# Omega's references come first; the candidate brands share what is left.
+# Twice a day this stays far below the eBay Browse API's daily allowance.
+MAX_QUERIES_PER_RUN = 90
 
 # Below this many vanished listings, treat a reference's numbers as unknown.
 MIN_VANISHED = 5
@@ -78,7 +80,10 @@ def references_to_poll(conn, limit: int) -> list[dict]:
         left join comp_queries q
                on q.query_brand = l.brand
               and q.query_reference = l.reference_number
-        where l.brand ilike %s
+        where (l.brand ilike %(target)s
+               or (lower(translate(l.brand, 'èéêÈÉÊ', 'eeeeee')) = any(%(candidates)s)
+                   and (lower(l.brand) <> 'seiko'
+                        or concat_ws(' ', l.watch_model, l.title, l.reference_number) ~* %(premium)s)))
           and l.reference_number is not null
           and l.gender in ('men', 'unisex')
           and l.reference_number ~ '^[0-9]'
@@ -90,12 +95,13 @@ def references_to_poll(conn, limit: int) -> list[dict]:
           and r.lot_id is null
           and l.close_time > now()
           and (q.last_run_at is null
-               or q.last_run_at < now() - make_interval(days => %s)) 
+               or q.last_run_at < now() - make_interval(days => %(refresh)s))
         group by 1, 2
-        order by min(l.close_time)
-        limit %s
+        order by (l.brand ilike %(target)s) desc, min(l.close_time)
+        limit %(limit)s
         """,
-        (cfg.target_brand, REFRESH_DAYS, limit),
+        {"target": cfg.target_brand, "candidates": cfg.candidate_keys,
+         "premium": cfg.premium_seiko_pattern, "refresh": REFRESH_DAYS, "limit": limit},
     ).fetchall()
 
 

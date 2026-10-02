@@ -218,6 +218,24 @@ def update_close_time(conn, lot_id: str, close_time) -> None:
     )
 
 
+# Which open lots matter most to the monitor. 0 = the vintage Omegas you are
+# alerted on, 1 = vintage lots of the candidate brands (better Seikos only),
+# 2 = everything else, which still feeds the price model with what is left.
+MONITOR_TIER_SQL = """
+    case
+      when not (coalesce(l.gender in ('men', 'unisex'), false)
+                and (coalesce(l.watch_year between 1950 and 1989, false)
+                     or coalesce(l.watch_period ~ '^(1950|1960|1970|1980)', false)))
+        then 2
+      when lower(l.brand) = lower(%(target)s) then 0
+      when lower(translate(l.brand, 'èéêÈÉÊ', 'eeeeee')) = any(%(candidates)s)
+           and (lower(l.brand) <> 'seiko'
+                or concat_ws(' ', l.watch_model, l.title, l.reference_number) ~* %(premium)s)
+        then 1
+      else 2
+    end"""
+
+
 def lots_due_for_monitoring(conn, limit: int = 40) -> list[dict[str, Any]]:
     """Open lots whose last snapshot is older than their cadence allows.
 
@@ -225,12 +243,17 @@ def lots_due_for_monitoring(conn, limit: int = 40) -> list[dict[str, Any]]:
     six-hourly, hourly, and every 15 minutes in the final hour. Almost all the
     information in an auction arrives at the end, so that is where the page
     budget goes.
+
+    When more lots are due than one pass can read, your own lots go first
+    (MONITOR_TIER_SQL), each tier soonest close first, so the ones skipped
+    are never the ones you might bid on.
     """
     return conn.execute(
         """
         select l.lot_id, l.url, l.close_time,
                round(extract(epoch from (l.close_time - now())) / 3600.0, 2)
-                   as hours_left
+                   as hours_left,
+               """ + MONITOR_TIER_SQL + """ as tier
         from lots l
         left join lot_results r using (lot_id)
         where r.lot_id is null
@@ -246,8 +269,9 @@ def lots_due_for_monitoring(conn, limit: int = 40) -> list[dict[str, Any]]:
                 when l.close_time - now() < interval '24 hours' then interval '6 hours'
                 else interval '24 hours'
               end
-        order by l.close_time
-        limit %s
+        order by tier, l.close_time
+        limit %(limit)s
         """,
-        (limit,),
+        {"limit": limit, "target": cfg.target_brand, "candidates": cfg.candidate_keys,
+         "premium": cfg.premium_seiko_pattern},
     ).fetchall()
