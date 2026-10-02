@@ -236,6 +236,9 @@ def report_replay(df, days):
     print(f"C. REPLAY — last {days:.0f} days, budget €{BUDGET_ALL_IN:.0f}, moderate settings")
     print(f"   {sl.ratio_text()}")
     print(f"   {sl.bias_text()}")
+    c = sl.CHANNELS[sl.PLAN_CHANNEL]
+    print(f"   profit planned on {sl.PLAN_CHANNEL} (fee {c['fee']:.1%} + €{c['fixed'] + c['ship']:.0f}) "
+          f"after a {sl.WARRANTY_RESERVE:.0%} reserve; inbound shipping €{cfg.expected_inbound_shipping:.0f}")
     for k, (r, m) in SETTINGS.items():
         print(f"   {k:<9} resale {r:.0%} of value, margin {m:.0%}")
     print()
@@ -259,25 +262,27 @@ def report_replay(df, days):
     print("   Feature-tier profit is the model agreeing with itself — treat it as a lead count.\n")
 
     # Which margin rule? Same lots, same model — only the required margin differs.
-    # The stress columns re-run each rule as if every resale came in 15% below
-    # the estimate: a good rule should lose less there, not just win more.
+    # Stress = keep exactly the bids each rule made, then assume every resale
+    # actually came in 15% below the estimate. A good rule loses less there.
     print("   margin rule, evidence-valued lots:")
     print(f"   {'rule':<14}{'avg margin':>11}{'won':>6}{'profit':>9}{'losers':>8}"
-          f"{'stress profit':>15}{'stress losers':>15}")
+          f"{'if resale −15%':>16}{'losers':>8}")
     evid = df[df["kind"] != "feature"]
-    stressed = {k: (r * 0.85, m) for k, (r, m) in SETTINGS.items()}
     for rule in ("fixed", "uncertainty"):
         e = evaluate(evid, SETTINGS, rule)
-        st = evaluate(evid, stressed, rule)
-        w, ws = e[e["won"]], st[st["won"]]
-        avg_m = (e["ceiling"].notna()).sum() and (
-            evid.apply(lambda r: sl.margin_for(r["kind"], r.get("sigma"), center=SETTINGS[r["kind"]][1])
-                       if rule == "uncertainty" else SETTINGS[r["kind"]][1], axis=1).mean())
+        w = e[e["won"]]
+        if len(w):
+            realism = w["kind"].map(lambda k: SETTINGS[k][0])
+            sale = w["value"] * realism * 0.85
+            stress = sale.map(sl.net_from) - w["landed"]
+        else:
+            stress = pd.Series(dtype=float)
+        avg_m = evid.apply(lambda r: sl.margin_for(r["kind"], r.get("sigma"), center=SETTINGS[r["kind"]][1])
+                           if rule == "uncertainty" else SETTINGS[r["kind"]][1], axis=1).mean()
         print(f"   {rule:<14}{avg_m:>11.0%}{len(w):>6}{w['profit'].sum():>9.0f}"
-              f"{int((w['profit'] < 0).sum()):>8}{ws['profit'].sum():>15.0f}"
-              f"{int((ws['profit'] < 0).sum()):>15}")
-    print("   Prefer the rule with more profit in BOTH columns; if they split, the")
-    print("   stress column matters more until real sales confirm the resale level.\n")
+              f"{int((w['profit'] < 0).sum()):>8}{stress.sum():>16.0f}{int((stress < 0).sum()):>8}")
+    print("   Prefer the rule with more profit in both columns; if they split, the")
+    print("   −15% column matters more until real sales confirm the resale level.\n")
 
     both = ev[ev["kind"] != "feature"].dropna(subset=["fair"])
     if len(both):

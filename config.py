@@ -33,7 +33,7 @@ class Config:
     # Purchase guardrail, used by the future decision/alert layer.  This is
     # the all-in cap, not the bid shown on Catawiki.
     max_all_in_cost: float = 700.0
-    expected_inbound_shipping: float = 25.0
+    expected_inbound_shipping: float = 30.0
     catawiki_buyer_fee_rate: float = 0.09
     catawiki_buyer_fixed_fee: float = 3.0
 

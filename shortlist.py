@@ -10,14 +10,17 @@ For every open vintage-Omega lot closing within WINDOW_HOURS it combines:
   predicted close   the hammer model, retrained on every closed lot, with its
                     band edges calibrated on the most recent week
   expected resale   the lower quarter of the live eBay asks for the same
-                    reference, after dropping parts, other currencies, gold or
-                    two-tone variants of a steel watch, and outliers; else
-                    earlier Catawiki sales or the listing-only model
-  total cost        hammer + Catawiki fee + shipping both ways + a warranty
-                    reserve, plus import VAT when the seller is outside the EU
+                    reference, after dropping parts, other currencies, other
+                    materials and model lines, serviced dealer stock (for an
+                    as-is lot) and outliers; else earlier Catawiki sales or
+                    the listing-only model
+  total cost        hammer + Catawiki fee + inbound shipping, plus import VAT
+                    and customs handling when the seller is outside the EU
+  selling costs     per channel (CHANNELS): in person, Chrono24, eBay
 
-and turns them into a maximum bid, the chance the lot closes under it, and an
-expected profit. Nothing here places bids. It tells you where to look.
+and turns them into a maximum bid (planned on PLAN_CHANNEL, after a reserve
+for repairs and returns), the chance the lot closes under it, and the cash
+profit on each channel. Nothing here places bids. It tells you where to look.
 
 Every constant below is a judgement call. They are collected here so they can
 be changed in one place as your own sales replace the assumptions.
@@ -47,6 +50,8 @@ CAL_DAYS = 7              # calibrate on this many most recent days
 
 # eBay tier: the value is already the lower quarter of the cleaned asks (see
 # asks.py), roughly where a new seller has to list. 0.95 leaves room for offers.
+# value × realism is the QUICK-SALE price: priced among the cheapest quarter of
+# comparable watches, after a buyer's offer. Retail, but priced to move.
 REALISM_EBAY = 0.95
 REALISM_REF = REALISM_EBAY  # Catawiki tier: same scale as eBay since the ratio is measured
 REALISM_LINE = 0.75       # the same, when only a line-level ask is available
@@ -67,14 +72,41 @@ MARGIN_PER_SIGMA = 1.0
 MARGIN_MIN, MARGIN_MAX = 0.15, 0.45
 SIGMA_REF = {"evidence": None}   # set by calibrate_margin()
 SIGMA_FLOOR = 0.05        # even many tight comparables are asks, not sales
-OUTBOUND_SHIPPING = 15.0  # insured shipping to your buyer
-WARRANTY_RESERVE = 0.05   # share of each sale set aside for returns and repairs
-# What the selling platform takes. 0.07 = Chrono24 as a private seller; eBay.at
-# is about 0.11; Willhaben, Instagram or forums are ~0 (PayPal goods & services
-# ~3%). Set it to the channel you actually sell through — trade.py will show
-# the real figure once you have sales.
-SALE_FEE = 0.07
-IMPORT_VAT = 0.20         # Austrian import VAT on goods from outside the EU
+
+# ------------------------------------------------------------ selling costs
+# Where you sell decides how much of the sale price you keep. Per channel:
+#   fee    share of the price the platform takes
+#   fixed  € per sale
+#   ship   what sending it costs YOU (insured, price incl. shipping)
+# Checked Oct 2026 for a private seller in Austria:
+#   in person  Willhaben or Instagram, paid on hand-over: nothing. Willhaben
+#              PayLivery (Austria only) is free for the seller too; the buyer
+#              pays postage, but Post AG's standard cover ends at €510.
+#              Instagram by bank transfer: nothing; PayPal goods & services
+#              3.4% + €0.35.
+#   Chrono24   private seller 6.5%, paid out via escrow after delivery; you
+#              may charge the buyer for insured shipping (then set ship 0).
+#   eBay       eBay.at private seller: 11% + 0.42% operating fee + €0.35, on
+#              the total including postage.
+CHANNELS = {
+    "in person": {"fee": 0.0,    "fixed": 0.0,  "ship": 0.0},
+    "Chrono24":  {"fee": 0.065,  "fixed": 0.0,  "ship": 15.0},
+    "eBay":      {"fee": 0.1142, "fixed": 0.35, "ship": 15.0},
+}
+# The max bid is planned on this channel: the big market you can always fall
+# back to if nobody local buys. Selling in person is then upside. Once
+# trade.py shows where your sales really happen, plan on that channel.
+PLAN_CHANNEL = "Chrono24"
+
+# Expected cost of what goes wrong after you buy — a return, a regulation, a
+# crystal, a watch that stops a week after the sale — as a share of the sale
+# price. It is not paid on every watch; it is the average. Applied to the max
+# bid only, never shown as money you pay. trade.py costs replace it later.
+WARRANTY_RESERVE = 0.05
+
+IMPORT_VAT = 0.20         # Austrian import VAT on goods from outside the EU,
+                          # charged on the price + shipping (not Catawiki's fee)
+IMPORT_CLEARANCE = 20.0   # the carrier's customs handling charge; duty may add more
 
 MIN_WIN_PROB = 0.20       # below this, a lot is not worth your attention
 MIN_CONDITION = 3         # 3 = 'Good'; Fair and Poor are filtered out
@@ -118,7 +150,8 @@ REALISM_FEAT = 0.85       # 10% below the evidence tiers: no comparables
 # WITHOUT the latest week, predicts that week, and is compared with the eBay
 # value of the lots there that have one. Never below 1.0 — the correction may
 # only make the feature tier more careful, not more optimistic.
-FEAT_BIAS = 1.10          # fallback when the latest week has too few lots
+FEAT_BIAS = 1.00          # fallback when the latest week has too few lots
+                          # (measured 1.00 live on 1 Oct; 1.10 over-corrected)
 MIN_BIAS_LOTS = 15
 BIAS_INFO = {"bias": FEAT_BIAS, "lots": 0, "measured": False}
 FEAT_MARGIN = 0.35        # stricter than TARGET_MARGIN
@@ -203,10 +236,11 @@ def catawiki_by_ref(closed: pd.DataFrame) -> pd.DataFrame:
     c = c.dropna(subset=["k"])
     if c.empty:
         return pd.DataFrame(columns=["median", "count", "sales"])
-    c = c.assign(mat=c.apply(model.lot_material, axis=1))
+    c = c.assign(mat=c.apply(model.lot_material, axis=1),
+                 lines=(c["watch_model"].fillna("") + " " + c["title"].fillna("")).map(asks.lines_in))
     out = c.groupby("k")["final_price"].agg(["median", "count"])
     out["sales"] = c.groupby("k").apply(
-        lambda g: list(zip(g["final_price"].astype(float), g["mat"])))
+        lambda g: list(zip(g["final_price"].astype(float), g["mat"], g["lines"])))
     return out
 
 
@@ -215,13 +249,15 @@ def catawiki_value(lot, cw_by_ref, with_spread: bool = False):
     k = model.ref_key(lot["reference_number"])
     if not k or k not in cw_by_ref.index:
         return None
-    mat = model.lot_material(lot)
+    mat, line = model.lot_material(lot), asks.lot_line(lot)
     sales = cw_by_ref.loc[k, "sales"]
     if mat in ("steel", "plated", "gold", "bicolor"):
-        sales = [(p, m) for p, m in sales if m in (mat, "unknown", "other")]
+        sales = [x for x in sales if x[1] in (mat, "unknown", "other")]
+    if line:
+        sales = [x for x in sales if not x[2] or line in x[2]]
     if len(sales) < MIN_REF_SALES:
         return None
-    prices = np.array([p for p, _ in sales], float)
+    prices = np.array([x[0] for x in sales], float)
     if not with_spread:
         return float(np.median(prices)), len(sales)
     sd = float(np.std(np.log(prices), ddof=1)) if len(prices) > 1 else 0.5
@@ -233,7 +269,7 @@ def ebay_value(lot, by_ref) -> tuple[float, int] | None:
     k = model.ref_key(lot["reference_number"])
     if not k or k not in by_ref:
         return None
-    v = asks.value(by_ref[k], asks.lot_material(lot))
+    v = asks.value(by_ref[k], asks.lot_material(lot), asks.lot_line(lot), asks.lot_serviced(lot))
     return v if v is not None and v[1] >= MIN_REF_LISTINGS else None
 
 
@@ -320,22 +356,25 @@ def ratio_text() -> str:
 
 
 class Value(tuple):
-    """(value, realism, basis, kind) — unpacks like before — plus .sigma."""
+    """(value, realism, basis, kind) — unpacks like before — plus .sigma and
+    .list_price (the median comparable ask, when eBay listings exist)."""
     sigma: float | None = None
+    list_price: float | None = None
 
 
-def _value(value, realism, basis, kind, sigma):
+def _value(value, realism, basis, kind, sigma, list_price=None):
     v = Value((value, realism, basis, kind))
     v.sigma = float(sigma) if sigma is not None else None
+    v.list_price = float(list_price) if list_price else None
     return v
 
 
-def ebay_stats(lot, by_ref) -> tuple[float, int, float] | None:
+def ebay_stats(lot, by_ref) -> dict | None:
     k = model.ref_key(lot["reference_number"])
     if not k or k not in by_ref:
         return None
-    v = asks.value_stats(by_ref[k], asks.lot_material(lot))
-    return v if v is not None and v[1] >= MIN_REF_LISTINGS else None
+    s = asks.summary(by_ref[k], asks.lot_material(lot), asks.lot_line(lot), asks.lot_serviced(lot))
+    return s if s is not None and s["n"] >= MIN_REF_LISTINGS else None
 
 
 def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
@@ -353,7 +392,7 @@ def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
     cw = catawiki_value(lot, cw_by_ref, with_spread=True)
     s_ratio = RATIO_INFO.get("sigma", 0.20)
     if es is not None:
-        ve, n, sd_e = es
+        ve, n, sd_e, med = es["value"], es["n"], es["sd"], es["median"]
         sig_e = math.sqrt(sd_e ** 2 / n + SIGMA_FLOOR ** 2)
     if cw is not None:
         vc, m, sd_c = cw[0] * ASK_TO_HAMMER, cw[1], cw[2]
@@ -366,9 +405,9 @@ def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
         sig = max(0.5 * math.sqrt(sig_e ** 2 + sig_c ** 2), d / 2)
         return _value(math.sqrt(ve * vc), REALISM_EBAY,
                       f"eBay €{ve:.0f} ({n} listings) and Catawiki €{vc:.0f} ({m} sales), combined",
-                      "ebay", sig)
+                      "ebay", sig, med)
     if es is not None:
-        return _value(ve, REALISM_EBAY, f"the cheaper quarter of {n} eBay listings", "ebay", sig_e)
+        return _value(ve, REALISM_EBAY, f"the cheaper quarter of {n} eBay listings", "ebay", sig_e, med)
     if cw is not None:
         return _value(vc, REALISM_REF, f"{m} Catawiki sales", "catawiki", sig_c)
     if USE_FEATURE_TIER and fair is not None and np.isfinite(fair) and fair > 0:
@@ -413,8 +452,31 @@ def fixed_in() -> float:
 
 
 def landed(bid: float, non_eu: bool) -> float:
-    vat = 1 + (IMPORT_VAT if non_eu else 0)
-    return (bid * fee_mult() + fixed_in()) * vat
+    """Everything you pay to have the watch in your hands."""
+    cost = bid * fee_mult() + fixed_in()
+    if non_eu:
+        cost += IMPORT_VAT * (bid + cfg.expected_inbound_shipping) + IMPORT_CLEARANCE
+    return cost
+
+
+def hammer_for(cost: float, non_eu: bool) -> float:
+    """The hammer price whose landed cost is `cost` (the inverse of landed)."""
+    per_euro = fee_mult() + (IMPORT_VAT if non_eu else 0)
+    fixed = fixed_in() + ((IMPORT_VAT * cfg.expected_inbound_shipping + IMPORT_CLEARANCE)
+                          if non_eu else 0)
+    return (cost - fixed) / per_euro
+
+
+def keep(price: float, channel: str) -> float:
+    """What you are left with from a sale at `price` on `channel`, after the
+    platform fee and shipping — the money that reaches you."""
+    c = CHANNELS[channel]
+    return price * (1 - c["fee"]) - c["fixed"] - c["ship"]
+
+
+def net_from(sale: float, channel: str | None = None) -> float:
+    """Planning net: what you keep on the plan channel, less the reserve."""
+    return keep(sale, channel or PLAN_CHANNEL) - WARRANTY_RESERVE * sale
 
 
 def margin_for(kind: str, sigma: float | None = None, center: float | None = None) -> float:
@@ -443,12 +505,13 @@ def calibrate_margin(closed: pd.DataFrame, by_ref, cw_by_ref) -> float | None:
 
 def max_bid(value: float, realism: float, non_eu: bool,
             margin: float = TARGET_MARGIN) -> tuple[float, float]:
-    """Highest hammer that still clears the margin, capped by the budget."""
-    sale = value * realism
-    net_sale = sale * (1 - WARRANTY_RESERVE - SALE_FEE) - OUTBOUND_SHIPPING
-    vat = 1 + (IMPORT_VAT if non_eu else 0)
-    by_margin = (net_sale / (1 + margin) / vat - fixed_in()) / fee_mult()
-    by_budget = (cfg.max_all_in_cost / vat - fixed_in()) / fee_mult()
+    """Highest hammer that still clears the margin, capped by the budget.
+
+    Planned on PLAN_CHANNEL at the quick-sale price, after the reserve.
+    Returns (max bid, planning net from the sale)."""
+    net_sale = net_from(value * realism)
+    by_margin = hammer_for(net_sale / (1 + margin), non_eu)
+    by_budget = hammer_for(cfg.max_all_in_cost, non_eu)
     return min(by_margin, by_budget), net_sale
 
 
@@ -697,6 +760,10 @@ def score() -> tuple[pd.DataFrame, dict]:
             "compare": ebay_search(lot["reference_number"]),
             "realism": realism, "net_sale": net_sale, "kind": kind,
             "margin": margin, "sigma": getattr(v, "sigma", None),
+            "sale": value * realism,
+            # first list price: the median comparable ask, never below the quick price
+            "list_price": (max(v.list_price, value * realism)
+                           if getattr(v, "list_price", None) else None),
             "profit_at_max": net_sale - landed(ceiling, non_eu),
             "landed_at_max": landed(ceiling, non_eu),
             "close_time": lot["close_time"],
@@ -706,8 +773,7 @@ def score() -> tuple[pd.DataFrame, dict]:
             "country": country,
             "has_late_bid": active_late,
             "seen_at": lot.get("last_seen"),
-            "serviced": bool(model.FLAG_RES["serviced"].search(
-                f"{lot['title'] or ''} {lot['description'] or ''}")),
+            "serviced": asks.lot_serviced(lot),
         })
 
     out = pd.DataFrame(rows)
@@ -740,7 +806,8 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
     if out.empty:
         print("Nothing worth a look right now.")
         return
-    print("'if won' = profit if you win at your max bid (the worst case);")
+    print(f"'if won' = profit if you win at your max bid (the worst case), selling on "
+          f"{PLAN_CHANNEL} at the quick-sale price, after the {WARRANTY_RESERVE:.0%} reserve;")
     print("'exp. €' = that profit × the chance of winning, used for ranking.\n")
 
     print(f"{'closes':>7}  {'line':<15}{'ref':<14}{'now':>6}{'likely':>8}"
@@ -754,18 +821,26 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
             extra += f" · {r['flags']}"
         print(f"{'':>9}{extra}")
         print(f"{'':>9}{breakdown(r)}")
+        print(f"{'':>9}cash profit at €{r['sale']:.0f} if won at the max: "
+              + " · ".join(f"{c} €{p:.0f}" for c, p in channel_profits(r["sale"], r["landed_at_max"])))
         print(f"{'':>9}{r['url']}")
         if isinstance(r.get("compare"), str):
             print(f"{'':>9}compare: {r['compare']}")
         print(f"{'':>9}details: python explain.py {r['lot_id']}")
 
 
+def channel_profits(price: float, landed_cost: float) -> list[tuple[str, float]]:
+    """Cash profit per selling channel for a sale at `price` — fee and
+    shipping taken off, the reserve not (it is an average, not a bill)."""
+    return [(c, keep(price, c) - landed_cost) for c in CHANNELS]
+
+
 def breakdown(r) -> str:
-    """One line showing where the profit number comes from."""
+    """One line showing where the planning number comes from."""
     sale = r["value"] * r["realism"]
-    return (f"value €{r['value']:.0f} × {r['realism']:.0%} = sell €{sale:.0f} → "
-            f"net €{r['net_sale']:.0f} after fees, reserve + shipping · "
-            f"max bid €{r['max_bid']:.0f} keeps {r['margin']:.0%} margin"
+    return (f"value €{r['value']:.0f} × {r['realism']:.0%} = quick sale €{sale:.0f} → "
+            f"net €{r['net_sale']:.0f} on {PLAN_CHANNEL} after fee, shipping + "
+            f"{WARRANTY_RESERVE:.0%} reserve · max bid €{r['max_bid']:.0f} keeps {r['margin']:.0%} margin"
             + (f" (uncertainty ±{r['sigma']:.0%})" if r.get("sigma") is not None else ""))
 
 
@@ -778,7 +853,8 @@ EVIDENCE = {
 
 
 def _eur(x: float) -> str:
-    return f"€{x:,.0f}"
+    x = round(x)
+    return f"−€{-x:,.0f}" if x < 0 else f"€{x:,.0f}"
 
 
 def _closes(r) -> str:
@@ -823,14 +899,21 @@ def message(r) -> str:
     out.append("")
 
     out.append(f"<b>If you win at {_eur(r['max_bid'])}</b>")
-    vat = " + 20% import VAT" if non_eu else ""
-    out.append(f"You pay {_eur(r['landed_at_max'])} all-in (fees + shipping{vat})")
-    out.append(f"You sell for about {_eur(sale)} → {_eur(r['net_sale'])} after "
-               f"{SALE_FEE:.0%} platform fee, shipping and a returns reserve")
-    out.append(f"Profit about <b>{_eur(r['profit_at_max'])}</b> ({margin:.0%})")
+    vat = " + import VAT and customs handling" if non_eu else ""
+    out.append(f"You pay {_eur(r['landed_at_max'])} all-in (Catawiki fee + shipping{vat})")
+    lp = r.get("list_price")
+    if lp is not None and pd.notna(lp) and lp > sale * 1.03:
+        out.append(f"List at about {_eur(lp)} (middle of comparable asks), "
+                   f"quick-sale price {_eur(sale)}")
+    else:
+        out.append(f"Quick-sale price about {_eur(sale)}")
+    profits = " · ".join(f"{c} {_eur(p)}" for c, p in channel_profits(sale, r["landed_at_max"]))
+    out.append(f"Profit if it sells for {_eur(sale)}: <b>{profits}</b>")
+    out.append(f"The max bid still keeps {margin:.0%} selling on {PLAN_CHANNEL}, "
+               f"after a {WARRANTY_RESERVE:.0%} reserve for repairs and returns")
     if r["p50"] < r["max_bid"] * 0.95:
-        out.append(f"At the likely {_eur(r['p50'])}: about "
-                   f"{_eur(r['net_sale'] - landed(r['p50'], non_eu))}")
+        saved = r["landed_at_max"] - landed(r["p50"], non_eu)
+        out.append(f"If it closes near the likely {_eur(r['p50'])}: {_eur(saved)} more on each")
     out.append("")
 
     out.append(f"<b>Evidence:</b> {EVIDENCE.get(r['kind'], r['kind'])}")
