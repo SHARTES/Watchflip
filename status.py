@@ -217,7 +217,9 @@ def ops():
     if f.empty:
         print("   no runs logged in the last 7 days — is the daemon running?")
         return
-    expected = {"monitor": 96 * 7, "discover": 12 * 7, "sweeper": 48 * 7}
+    # runs a week if the Mac never slept — keep in step with run.py's schedule
+    # (discover and sweeper pause 17:00–23:00 since 2 Oct)
+    expected = {"monitor": 96 * 7, "discover": 10 * 7, "sweeper": 38 * 7}
     for _, r in f.iterrows():
         exp = expected.get(r["job"])
         share = f"{r['runs'] / exp:.0%} of schedule" if exp else ""
