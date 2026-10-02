@@ -36,20 +36,30 @@ RELIST_GAP = 0.02       # "same price": within 2%
 STALE_DAYS = 30         # a listing up this long without selling is a wish
 MIN_GROUP = 10          # listings needed before a line/material row is shown
 SERVICE_COST = (150, 250)
+# eBay returned at most 100 results per query until 2 Oct (comps.PAGE_LIMIT is
+# 200 since). A query that filled the page saw only the top of eBay's
+# best-match order, which reshuffles: there a "vanished" listing often just
+# slipped below the cut. Disappearances count only for references whose last
+# query came back below this — complete result sets, under either limit.
+COMPLETE_BELOW = 100
 
 
 def load() -> pd.DataFrame:
     with db.connect() as conn:
         rows = conn.execute("""
-            select comp_id, title, price, first_price, currency, query_reference,
-                   first_seen_at, last_seen_at, disappeared_at, seen_count
-            from comps where price > 0""").fetchall()
+            select c.comp_id, c.title, c.price, c.first_price, c.currency, c.query_reference,
+                   c.first_seen_at, c.last_seen_at, c.disappeared_at, c.seen_count,
+                   q.results as query_results
+            from comps c
+            left join comp_queries q
+              on q.query_brand = c.query_brand and q.query_reference = c.query_reference
+            where c.price > 0""").fetchall()
     c = pd.DataFrame(rows)
     if c.empty:
         return c
     for col in ("first_seen_at", "last_seen_at", "disappeared_at"):
         c[col] = pd.to_datetime(c[col], utc=True)
-    for col in ("price", "first_price"):
+    for col in ("price", "first_price", "query_results"):
         c[col] = pd.to_numeric(c[col], errors="coerce")
     c["k"] = c["query_reference"].map(model.ref_key)
     c = c.dropna(subset=["k", "price"])
@@ -63,6 +73,7 @@ def load() -> pd.DataFrame:
         line=t.map(lambda s: next((n for n in asks.LINE_RES if n in asks.lines_in(s)), None)),
         serviced=t.map(lambda s: bool(asks.SERVICED_RE.search(s))),
         gone=c["disappeared_at"].notna(),
+        complete=c["query_results"] < COMPLETE_BELOW,
     )
     return c.reset_index(drop=True)
 
@@ -101,7 +112,7 @@ def place(c: pd.DataFrame, row, at) -> dict | None:
 def clearing(c: pd.DataFrame, sold: pd.DataFrame, now) -> None:
     print("A. CLEARING LEVEL — where vanished asks sat among comparable asks live at the time")
     placed = [x for x in (place(c, r, r["last_seen_at"]) for _, r in sold.iterrows()) if x]
-    stale = c[~c["gone"] & (c["first_seen_at"] < now - pd.Timedelta(days=STALE_DAYS))]
+    stale = c[~c["gone"] & c["complete"] & (c["first_seen_at"] < now - pd.Timedelta(days=STALE_DAYS))]
     stale_placed = [x for x in (place(c, r, now) for _, r in stale.iterrows()) if x]
     print(f"   vanished listings, relists removed, with {MIN_POOL}+ comparable asks: {len(placed)}")
     if len(placed) < 10:
@@ -116,12 +127,18 @@ def clearing(c: pd.DataFrame, sold: pd.DataFrame, now) -> None:
     r25, rmed = p["to_p25"].median(), p["to_median"].median()
     print(f"   median vanished ask ÷ lower quarter       {r25:>6.2f}")
     print(f"   median vanished ask ÷ median ask          {rmed:>6.2f}")
+    if 0.40 <= p["rank"].median() <= 0.60:
+        print("   Vanished asks sit mid-range, not at the cheap end: either watches sell")
+        print("   across the range (condition and photos decide), or many disappearances")
+        print("   are withdrawals, not sales. Read the ratio below as an upper bound.")
+    import shortlist
+    used = shortlist.REALISM_EBAY
     implied = r25 * 0.95
-    verdict = ("about right" if 0.90 <= implied <= 1.02 else
-               "conservative — watches leave above it" if implied > 1.02 else
+    verdict = ("about right" if abs(implied - used) <= 0.06 else
+               "conservative — watches leave above it" if implied > used else
                "optimistic — watches leave below it")
     print(f"   → if buyers then knock ~5% off, a sale lands near {implied:.2f}× the lower quarter;")
-    print(f"     the shortlist assumes 0.95× (REALISM_EBAY): {verdict}.\n")
+    print(f"     the shortlist assumes {used:.2f}× (REALISM_EBAY): {verdict}.\n")
 
 
 def speed(c: pd.DataFrame, sold: pd.DataFrame, now) -> None:
@@ -136,7 +153,7 @@ def speed(c: pd.DataFrame, sold: pd.DataFrame, now) -> None:
         print(f"   vanished listings were up at least {up.median():.0f} days (median; we only see them"
               f" from the first poll), middle half {up.quantile(.25):.0f}–{up.quantile(.75):.0f}")
     recent = sold[sold["disappeared_at"] > now - pd.Timedelta(days=window)]
-    live = c[~c["gone"]]
+    live = c[~c["gone"] & c["complete"]]
     rows = []
     for (line, mat), g in live.groupby([live["line"].fillna("no line"), "mat"]):
         if len(g) < MIN_GROUP:
@@ -188,8 +205,9 @@ def service_premium(c: pd.DataFrame) -> None:
     ratio = float(np.exp(np.median(np.log(r["s"] / r["a"]))))
     typical = float(r["a"].median())
     gain = typical * (ratio - 1)
-    print(f"   {len(r)} references · serviced asks sit {ratio - 1:+.0%} above as-is asks "
-          f"(≈ €{gain:,.0f} on a typical €{typical:,.0f} watch)")
+    side = "above" if ratio >= 1 else "below"
+    print(f"   {len(r)} references · serviced asks sit {abs(ratio - 1):.0%} {side} as-is asks "
+          f"(≈ €{abs(gain):,.0f} on a typical €{typical:,.0f} watch)")
     lo, hi = SERVICE_COST
     verdict = ("covers a service with room to spare" if gain > hi * 1.3 else
                "about covers a service — only worth it if it also sells faster" if gain > lo else
@@ -205,10 +223,14 @@ def main() -> None:
         return
     now = pd.Timestamp.now(tz="UTC")
     relist = mark_relists(c)
-    sold = c[c["gone"] & ~relist]
+    sold = c[c["gone"] & ~relist & c["complete"]]
     print(f"eBay listings tracked since {c['first_seen_at'].min():%d %b}: {len(c):,} "
           f"(EUR, parts removed) · live {int((~c['gone']).sum()):,} · vanished {int(c['gone'].sum()):,}, "
-          f"of which {int(relist.sum()):,} came back as relists\n")
+          f"of which {int(relist.sum()):,} came back as relists")
+    refs = c.groupby("k")["complete"].first()
+    print(f"references with a complete eBay result set (under {COMPLETE_BELOW} results): "
+          f"{int(refs.sum()):,} of {len(refs):,} · vanished there, relists removed: {len(sold):,}")
+    print("A and B use only those: in a full result set a listing can drop out without selling.\n")
     clearing(c, sold, now)
     speed(c, sold, now)
     cuts(c)

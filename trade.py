@@ -12,7 +12,7 @@ is a guess until real sales replace it. This records each trade from purchase
 to sale, and `show` compares what happened with what the system expected:
 
   realised ÷ value   what you sold for, as a share of the value at purchase
-                     (the shortlist assumes 0.95 for eBay-valued watches)
+                     (the shortlist assumes REALISM_EBAY, see shortlist.py)
   days to sell       from purchase to sale (the capital check assumes 28)
   profit             sale − shipping − fees − purchase − every extra cost
 
@@ -175,8 +175,12 @@ def show(a) -> None:
               f"   (the capital check assumes 28)")
         if ratios:
             ratios.sort()
-            print(f"      median realised ÷ value {ratios[len(ratios) // 2]:.2f}"
-                  f"   (the shortlist assumes 0.95)")
+            try:
+                from shortlist import REALISM_EBAY as assumed
+                note = f"   (the shortlist assumes {assumed:.2f})"
+            except Exception:
+                note = ""
+            print(f"      median realised ÷ value {ratios[len(ratios) // 2]:.2f}{note}")
         if n < 5:
             print("      Fewer than 5 sales — read these as anecdotes, not rates.")
 

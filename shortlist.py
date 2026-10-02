@@ -49,9 +49,11 @@ WINDOW_HOURS = 6          # score lots closing within this many hours
 CAL_DAYS = 7              # calibrate on this many most recent days
 
 # eBay tier: the value is already the lower quarter of the cleaned asks (see
-# asks.py), roughly where a new seller has to list. 0.95 leaves room for offers.
+# asks.py), roughly where a new seller has to list.
 # value × realism is the QUICK-SALE price: priced among the cheapest quarter of
 # comparable watches, after a buyer's offer. Retail, but priced to move.
+# Re-set it from the median "realised ÷ value" in trade.py show once there are
+# 5+ real sales; resale.py's clearing level is a second, weaker check.
 REALISM_EBAY = 0.95
 REALISM_REF = REALISM_EBAY  # Catawiki tier: same scale as eBay since the ratio is measured
 REALISM_LINE = 0.75       # the same, when only a line-level ask is available

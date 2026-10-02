@@ -53,6 +53,12 @@ MAX_QUERIES_PER_RUN = 60
 # Below this many vanished listings, treat a reference's numbers as unknown.
 MIN_VANISHED = 5
 
+# Results asked for per query (the Browse API's maximum). A result set that
+# fills the page is only the top of eBay's best-match order, which reshuffles
+# between polls: a listing missing from it may simply have slipped below the
+# cut, so disappearances are only recorded when the page was NOT full.
+PAGE_LIMIT = 200
+
 
 # ------------------------------------------------------------- what to query
 
@@ -183,7 +189,7 @@ def run(limit: int = MAX_QUERIES_PER_RUN) -> None:
             query = f"{brand} {ref}"
 
             try:
-                items, source = client.search_sold(query, limit=100)
+                items, source = client.search_sold(query, limit=PAGE_LIMIT)
             except ebay.EbayError:
                 errors += 1
                 log.exception("query failed for %s", query)
@@ -205,7 +211,8 @@ def run(limit: int = MAX_QUERIES_PER_RUN) -> None:
                     conn.rollback()
                     log.exception("could not store listing for %s", query)
 
-            gone = mark_vanished(conn, brand, ref, seen_ids)
+            gone = (mark_vanished(conn, brand, ref, seen_ids)
+                    if len(items) < PAGE_LIMIT else 0)
             vanished_total += gone
             record_query(conn, brand, ref, len(items), gone, source)
             conn.commit()
