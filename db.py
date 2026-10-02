@@ -23,20 +23,26 @@ def connect(retries: int = 3):
     The laptop sleeps and wakes; a job that fires before Wi-Fi is back sees
     an unresolvable host. Waiting a few seconds costs nothing and saves the
     whole pass — the next discover is two hours away.
+
+    Only the connect is retried. An error inside the `with` body (a dropped
+    connection mid-query) is raised as it is: retrying there made Python
+    report "generator didn't stop after throw()" instead of the real error.
     """
     last: Exception | None = None
     for attempt in range(retries):
         try:
-            with psycopg.connect(cfg.database_url, row_factory=dict_row,
-                                 connect_timeout=10) as conn:
-                yield conn
-                return
+            conn = psycopg.connect(cfg.database_url, row_factory=dict_row,
+                                   connect_timeout=10)
         except psycopg.OperationalError as exc:
             last = exc
             if attempt < retries - 1:
                 log.warning("db connect failed (%s), retrying in %ds",
                             exc.__class__.__name__, 5 * (attempt + 1))
                 time.sleep(5 * (attempt + 1))
+            continue
+        with conn:                      # commit on success, roll back on error, close
+            yield conn
+        return
     raise last
 
 
@@ -81,12 +87,27 @@ def upsert_lot(conn, lot: dict[str, Any]) -> bool:
             "watch_condition": None,
             "movement": None,
             "case_diameter_mm": None,
-            **lot,
-            "photo_urls": json.dumps(lot.get("photo_urls") or []),
-            "raw": json.dumps(lot.get("raw") or {}),
+            **{k: _no_nul(v) for k, v in lot.items()},
+            "photo_urls": json.dumps(_no_nul(lot.get("photo_urls") or [])),
+            "raw": json.dumps(_no_nul(lot.get("raw") or {})),
         },
     ).fetchone()
     return bool(row["inserted"])
+
+
+def _no_nul(value):
+    """Remove NUL characters, which PostgreSQL refuses in text and jsonb.
+
+    A seller's description occasionally carries one (pasted from a PDF or a
+    form); without this the whole lot failed to save and was lost.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_no_nul(k): _no_nul(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_no_nul(v) for v in value]
+    return value
 
 
 def insert_snapshot(

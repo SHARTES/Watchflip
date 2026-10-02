@@ -998,6 +998,7 @@ def send_new(out: pd.DataFrame) -> None:
 
 STALE_MINUTES = 20        # a stored bid older than this is not shown as "now"
 LAST_CHANCE_MINUTES = 12  # if the live check keeps failing, send anyway after this
+REMIND_WAIT_SECONDS = 480 # how long the reminder waits for the browser
 
 
 def _fetch_live(due: list[dict]) -> dict:
@@ -1013,7 +1014,9 @@ def _fetch_live(due: list[dict]) -> dict:
 
     live = {}
     try:
-        with fetcher() as f, db.connect() as conn:
+        # A monitor pass in the evening holds the browser up to ~10 minutes;
+        # waiting for it beats sending a bid that is minutes old.
+        with fetcher(lock_timeout=REMIND_WAIT_SECONDS) as f, db.connect() as conn:
             for r in due:
                 if f.should_stop:
                     break

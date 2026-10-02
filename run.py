@@ -40,9 +40,14 @@ def serve() -> None:
     sched = BlockingScheduler(timezone="Europe/Vienna")
     sched.add_job(poller.monitor, "cron", minute="*/15", id="monitor",
                   max_instances=1, misfire_grace_time=300)
-    sched.add_job(poller.discover, "cron", hour="*/2", minute="10", id="discover",
+    # Most lots close between 18:00 and 23:00. Discover (20+ min) and the
+    # sweeper (several minutes) hold the only browser, and while they do the
+    # monitor skips its pass and the reminder cannot read the live bid. So both
+    # stay out of the evening: discover 00:10–16:10 every 2 h and 23:10; results
+    # are swept outside 18:00–22:59. Lots are listed days ahead, so none is missed.
+    sched.add_job(poller.discover, "cron", hour="0-16/2,23", minute="10", id="discover",
                   max_instances=1, misfire_grace_time=3600)
-    sched.add_job(sweeper.run, "cron", minute="20,50", id="sweeper",
+    sched.add_job(sweeper.run, "cron", hour="0-17,23", minute="20,50", id="sweeper",
                   max_instances=1, misfire_grace_time=900)
     sched.add_job(comps.run, "cron", hour="9, 21", minute="40", id="comps",
                   max_instances=1, misfire_grace_time=3600)
@@ -50,7 +55,8 @@ def serve() -> None:
                  id="shortlist", max_instances=1, misfire_grace_time=600)
     sched.add_job(shortlist.remind, "cron", minute="*/5", id="remind",
                    max_instances=1, misfire_grace_time=120)
-    log.info("scheduler: monitor every 15 min, discover every 2h, sweep twice an hour")
+    log.info("scheduler: monitor every 15 min; discover every 2 h and sweep twice an "
+             "hour, both paused 17:00–23:00 for the evening closes")
     sched.start()
 
 COMMANDS = {
