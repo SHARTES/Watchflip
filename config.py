@@ -21,7 +21,6 @@ class Config:
         ("https://www.catawiki.com/en/x/1383", 10),   # Seiko
         ("https://www.catawiki.com/en/x/1337", 6),    # Longines
         ("https://www.catawiki.com/en/x/1453", 4),    # Universal Genève
-        ("https://www.catawiki.com/en/x/1335", 4),    # Zenith
         ("https://www.catawiki.com/en/x/1341", 4),    # Tissot
         ("https://www.catawiki.com/en/c/333-wristwatches", 4),
     )
@@ -38,12 +37,21 @@ class Config:
     # references get eBay comparables. For Seiko only the better lines count:
     # King Seiko, Grand Seiko, Lord Marvel, Lord Matic and the classic
     # chronograph and diver references; a Seiko 5 does not pay for the work.
-    candidate_brands: tuple = ("Seiko", "Longines", "Universal Genève", "Zenith", "Tissot")
+    candidate_brands: tuple = ("Seiko", "Longines", "Universal Genève", "Tissot")
     # Works in Python (re, case-insensitive) and in PostgreSQL (~*) alike.
     premium_seiko_pattern: str = (
         r"king ?seiko|grand ?seiko|lord ?marvel|lord ?matic"
         r"|(^|[^0-9])(6139|6138|6105|6306|6309|5626|5625|5645|5646|5606|4402|4420"
         r"|4502|4520|4522|5722|5740|5245|5246|6145|6146|6185|6186)([^0-9]|$)"
+    )
+    # Seiko dress watches in the Cartier Tank spirit: Dolce, Chariot, Lassale,
+    # Credor, Exceline, and anything rectangular, square or tonneau. Often
+    # quartz, often 24–30 mm and listed as women's or unisex, often from the
+    # 1980s–90s, so these count for any gender and up to 1999. Cheap at
+    # auction; what they resell for styled is what the data has to show.
+    style_seiko_pattern: str = (
+        r"dolce|chariot|lassale|credor|exceline|tank|rectang|rechteck|square"
+        r"|carr[ée]|tonneau|curved"
     )
     vintage_year_min: int = 1950
     vintage_year_max: int = 1989

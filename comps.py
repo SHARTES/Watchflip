@@ -80,18 +80,24 @@ def references_to_poll(conn, limit: int) -> list[dict]:
         left join comp_queries q
                on q.query_brand = l.brand
               and q.query_reference = l.reference_number
-        where (l.brand ilike %(target)s
-               or (lower(translate(l.brand, 'èéêÈÉÊ', 'eeeeee')) = any(%(candidates)s)
-                   and (lower(l.brand) <> 'seiko'
-                        or concat_ws(' ', l.watch_model, l.title, l.reference_number) ~* %(premium)s)))
+        where (
+                -- Vintage men's/unisex only. Without this the budget goes on
+                -- modern Seamasters and Speedmasters, which are not what we buy.
+                ((l.brand ilike %(target)s
+                  or (lower(translate(l.brand, 'èéêÈÉÊ', 'eeeeee')) = any(%(candidates)s)
+                      and (lower(l.brand) <> 'seiko'
+                           or concat_ws(' ', l.watch_model, l.title, l.reference_number) ~* %(premium)s)))
+                 and l.gender in ('men', 'unisex')
+                 and (l.watch_year between 1950 and 1989
+                      or l.watch_period ~ '^(1950|1960|1970|1980)'))
+                -- Seiko dress/tank style: any gender, up to 1999.
+                or (lower(l.brand) = 'seiko'
+                    and concat_ws(' ', l.watch_model, l.title) ~* %(style)s
+                    and (l.watch_year between 1960 and 1999
+                         or l.watch_period ~ '^(196|197|198|199)')))
           and l.reference_number is not null
-          and l.gender in ('men', 'unisex')
           and l.reference_number ~ '^[0-9]'
           and length(l.reference_number) between 4 and 20
-          -- Vintage only. Without this the budget goes on modern Seamasters
-          -- and Speedmasters, which are not what we buy.
-          and (l.watch_year between 1950 and 1989
-               or l.watch_period ~ '^(1950|1960|1970|1980)')
           and r.lot_id is null
           and l.close_time > now()
           and (q.last_run_at is null
@@ -101,7 +107,8 @@ def references_to_poll(conn, limit: int) -> list[dict]:
         limit %(limit)s
         """,
         {"target": cfg.target_brand, "candidates": cfg.candidate_keys,
-         "premium": cfg.premium_seiko_pattern, "refresh": REFRESH_DAYS, "limit": limit},
+         "premium": cfg.premium_seiko_pattern, "style": cfg.style_seiko_pattern,
+         "refresh": REFRESH_DAYS, "limit": limit},
     ).fetchall()
 
 

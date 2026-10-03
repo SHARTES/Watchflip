@@ -219,10 +219,16 @@ def update_close_time(conn, lot_id: str, close_time) -> None:
 
 
 # Which open lots matter most to the monitor. 0 = the vintage Omegas you are
-# alerted on, 1 = vintage lots of the candidate brands (better Seikos only),
-# 2 = everything else, which still feeds the price model with what is left.
+# alerted on, 1 = vintage lots of the candidate brands (better Seikos only)
+# and Seiko dress/tank-style pieces of any gender up to 1999, 2 = everything
+# else, which still feeds the price model with what is left.
 MONITOR_TIER_SQL = """
     case
+      when lower(l.brand) = 'seiko'
+           and concat_ws(' ', l.watch_model, l.title) ~* %(style)s
+           and (coalesce(l.watch_year between 1960 and 1999, false)
+                or coalesce(l.watch_period ~ '^(196|197|198|199)', false))
+        then 1
       when not (coalesce(l.gender in ('men', 'unisex'), false)
                 and (coalesce(l.watch_year between 1950 and 1989, false)
                      or coalesce(l.watch_period ~ '^(1950|1960|1970|1980)', false)))
@@ -273,5 +279,5 @@ def lots_due_for_monitoring(conn, limit: int = 40) -> list[dict[str, Any]]:
         limit %(limit)s
         """,
         {"limit": limit, "target": cfg.target_brand, "candidates": cfg.candidate_keys,
-         "premium": cfg.premium_seiko_pattern},
+         "premium": cfg.premium_seiko_pattern, "style": cfg.style_seiko_pattern},
     ).fetchall()

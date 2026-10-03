@@ -1,6 +1,7 @@
 """Which brands besides Omega could Retour buy and sell? Read-only.
 
     python brands.py              # vintage men's/unisex, 1950–1989, every brand
+    python brands.py tank         # Seiko dress/tank-style pieces in detail
     python brands.py seiko        # one brand in detail: models and references
                                   # ("seiko, better lines" is King/Grand Seiko,
                                   # Lord Marvel/Matic, classic chronos and divers)
@@ -65,6 +66,13 @@ def load() -> pd.DataFrame:
     era = (df["watch_year"].between(1950, 1989)
            | df["watch_period"].astype(str).str.match(r"^(1950|1960|1970|1980)"))
     df["vintage"] = era & df["gender"].isin(["men", "unisex"])
+    # Seiko dress/tank style counts for any gender and up to 1999 (config.py).
+    style = re.compile(cfg.style_seiko_pattern, re.I)
+    late = (df["watch_year"].between(1960, 1999)
+            | df["watch_period"].astype(str).str.match(r"^(196|197|198|199)"))
+    df["tank"] = (df["brand_k"].str.startswith("seiko") & late
+                  & (df["watch_model"].fillna("") + " " + df["title"].fillna("")).map(
+                      lambda t: bool(style.search(t))))
     df["mat"] = df.apply(model.lot_material, axis=1)
     return df
 
@@ -127,10 +135,23 @@ def overview(df: pd.DataFrame) -> None:
     print(f"\n({others['brand_k'].nunique()} smaller brands with fewer than {MIN_SOLD} vintage sales "
           f"left out — {int((others['sold'] == True).sum())} sales between them)")
 
+    t = df[df["tank"]]
+    s = t[t["sold"] == True]
+    if len(s):
+        p = s["final_price"]
+        tw = max((t["close_time"].max() - t["close_time"].min()).days / 7, 1)
+        print(f"\nSeiko dress and tank style (Dolce, Chariot, Lassale, Credor, rectangular…; any gender, 1960–1999):")
+        print(f"   {len(s)} sold of {len(t)} closed, {len(s) / tw:.1f} a week · hammer p25 €{p.quantile(.25):.0f}, "
+              f"median €{p.median():.0f}, p75 €{p.quantile(.75):.0f} · details: python brands.py tank")
+
 
 def detail(df: pd.DataFrame, brand: str) -> None:
     b = brand_key(brand.strip())
-    g = df[df["vintage"] & df["brand_k"].str.contains(b, regex=False)]
+    if b == "tank":
+        g = df[df["tank"]]
+        brand = "Seiko dress and tank style"
+    else:
+        g = df[df["vintage"] & df["brand_k"].str.contains(b, regex=False)]
     s = g[g["sold"] == True]
     if s.empty:
         print(f"No sold vintage lots for '{brand}'.")
