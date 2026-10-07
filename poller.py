@@ -25,7 +25,7 @@ import demand
 import re
 from config import cfg
 from fetcher import fetcher
-from parse import LOT_URL_RE, parse_listing_page, parse_lot_page
+from parse import LOT_URL_RE, looks_gone, parse_listing_page, parse_lot_page
 
 log = logging.getLogger("poller")
 
@@ -227,7 +227,7 @@ def monitor(limit: int | None = None) -> None:
             limit,
         )
 
-    snapped = extended = errors = 0
+    snapped = extended = errors = gone = 0
 
     try:
         with fetcher(lock_timeout=60) as f, db.connect() as conn:
@@ -243,6 +243,21 @@ def monitor(limit: int | None = None) -> None:
 
                 rec = parse_lot_page(html, row["url"])
                 if rec is None:
+                    if looks_gone(html):
+                        # Pulled before closing (by the seller or Catawiki).
+                        # Record it the way the sweeper does, so it stops
+                        # being scored and alerted as an open lot.
+                        try:
+                            db.record_result(conn, lot_id=row["lot_id"], final_price=None,
+                                             sold=False, bid_count=None,
+                                             closed_at=row["close_time"])
+                            conn.commit()
+                            gone += 1
+                        except Exception:
+                            errors += 1
+                            conn.rollback()
+                            log.exception("could not record removed lot %s", row["lot_id"])
+                        continue
                     errors += 1
                     continue
 
@@ -264,14 +279,14 @@ def monitor(limit: int | None = None) -> None:
                     log.exception("snapshot failed for %s", row["lot_id"])
 
             db.log_run(conn, "monitor", lots_seen=snapped, errors=errors,
-                       note=f"extended={extended}")
+                       note=f"extended={extended} gone={gone}")
             conn.commit()
     except TimeoutError:
         log.info("browser busy (discover is probably running) — skipping this pass")
         return
 
-    log.info("monitor: %d snapshots, %d extensions, %d errors",
-             snapped, extended, errors)
+    log.info("monitor: %d snapshots, %d extensions, %d removed, %d errors",
+             snapped, extended, gone, errors)
 
 
 run = discover

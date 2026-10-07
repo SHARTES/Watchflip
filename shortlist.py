@@ -1004,13 +1004,16 @@ REMIND_WAIT_SECONDS = 480 # how long the reminder waits for the browser
 def _fetch_live(due: list[dict]) -> dict:
     """Open each lot page once, right now, and return {lot_id: (bid, seen, close)}.
 
+    A lot whose page Catawiki has removed comes back as {lot_id: None}, and is
+    recorded as closed unsold so nothing scores or reminds about it again.
+
     Uses the same browser, lock and politeness as the monitor, and stores what
     it reads as a normal snapshot. If the browser is busy or blocked, returns
     what it managed — the caller falls back or retries.
     """
     import poller
     from fetcher import fetcher
-    from parse import parse_lot_page
+    from parse import looks_gone, parse_lot_page
 
     live = {}
     try:
@@ -1022,6 +1025,13 @@ def _fetch_live(due: list[dict]) -> dict:
                     break
                 html = f.get_html(r["url"])
                 rec = parse_lot_page(html, r["url"]) if html else None
+                if rec is None and html and looks_gone(html):
+                    db.record_result(conn, lot_id=r["lot_id"], final_price=None,
+                                     sold=False, bid_count=None,
+                                     closed_at=r["close_time"])
+                    conn.commit()
+                    live[r["lot_id"]] = None
+                    continue
                 if rec is None or rec.get("_current_bid") is None:
                     continue
                 close = rec.get("close_time") or r["close_time"]
@@ -1080,6 +1090,13 @@ def remind() -> None:
 
     with db.connect() as conn:
         for r in due:
+            if r["lot_id"] in live and live[r["lot_id"]] is None:
+                # Removed from Catawiki: a link to a dead page helps nobody.
+                conn.execute("update shortlist_alerts set reminded_at = now() "
+                             "where lot_id = %s", (r["lot_id"],))
+                conn.commit()
+                log.info("alerted lot %s was removed from Catawiki — no reminder", r["lot_id"])
+                continue
             if r["lot_id"] in live:
                 bid, seen, close_utc = live[r["lot_id"]]
                 fresh = True
@@ -1133,7 +1150,8 @@ def remind() -> None:
             conn.commit()
             sent += 1
     if sent:
-        log.info("sent %d reminders (%d with a live bid)", sent, len(live))
+        log.info("sent %d reminders (%d with a live bid)", sent,
+                 sum(v is not None for v in live.values()))
 
 
 def countries() -> None:
