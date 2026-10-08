@@ -18,7 +18,7 @@ class Config:
     # is left and feeds the hammer model.
     watch_urls: tuple = (
         ("https://www.catawiki.com/en/x/1331", 40),   # Omega
-        ("https://www.catawiki.com/en/x/1383", 10),   # Seiko
+        ("https://www.catawiki.com/en/x/1383", 20),   # Seiko (page 10 was still full on 8 Oct)
         ("https://www.catawiki.com/en/x/1337", 6),    # Longines
         ("https://www.catawiki.com/en/x/1453", 4),    # Universal Genève
         ("https://www.catawiki.com/en/x/1341", 4),    # Tissot
@@ -57,6 +57,10 @@ class Config:
     # many listings only say "Seiko - Vintage - <reference>" in the title and
     # name the line (DOLCE on the dial) further down.
     style_seiko_names: str = r"dolce|chariot|lassale|lasalle|credor|exceline"
+    # Thin quartz movements that, in the collected lots, sit mostly in dress
+    # watches (8 Oct: each had 4+ lots, half or more named Dolce/Exceline/…).
+    # Catches "Seiko - Vintage - 5E31-5000" listings that name no line at all.
+    style_seiko_calibers: str = r"^(8J41|5E31|9021|8N41|1221|9521|7321|7741|7731|9531)-"
     vintage_year_min: int = 1950
     vintage_year_max: int = 1989
     training_max_price: float = 3000.0
