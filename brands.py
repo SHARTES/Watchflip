@@ -68,11 +68,13 @@ def load() -> pd.DataFrame:
     df["vintage"] = era & df["gender"].isin(["men", "unisex"])
     # Seiko dress/tank style counts for any gender and up to 1999 (config.py).
     style = re.compile(cfg.style_seiko_pattern, re.I)
+    names = re.compile(cfg.style_seiko_names, re.I)
     late = (df["watch_year"].between(1960, 1999)
             | df["watch_period"].astype(str).str.match(r"^(196|197|198|199)"))
     df["tank"] = (df["brand_k"].str.startswith("seiko") & late
-                  & (df["watch_model"].fillna("") + " " + df["title"].fillna("")).map(
-                      lambda t: bool(style.search(t))))
+                  & ((df["watch_model"].fillna("") + " " + df["title"].fillna("")).map(
+                      lambda t: bool(style.search(t)))
+                     | df["description"].fillna("").map(lambda t: bool(names.search(t)))))
     df["mat"] = df.apply(model.lot_material, axis=1)
     return df
 

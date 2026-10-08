@@ -92,7 +92,8 @@ def references_to_poll(conn, limit: int) -> list[dict]:
                       or l.watch_period ~ '^(1950|1960|1970|1980)'))
                 -- Seiko dress/tank style: any gender, up to 1999.
                 or (lower(l.brand) = 'seiko'
-                    and concat_ws(' ', l.watch_model, l.title) ~* %(style)s
+                    and (concat_ws(' ', l.watch_model, l.title) ~* %(style)s
+                         or coalesce(l.description, '') ~* %(style_names)s)
                     and (l.watch_year between 1960 and 1999
                          or l.watch_period ~ '^(196|197|198|199)')))
           and l.reference_number is not null
@@ -108,7 +109,7 @@ def references_to_poll(conn, limit: int) -> list[dict]:
         """,
         {"target": cfg.target_brand, "candidates": cfg.candidate_keys,
          "premium": cfg.premium_seiko_pattern, "style": cfg.style_seiko_pattern,
-         "refresh": REFRESH_DAYS, "limit": limit},
+         "style_names": cfg.style_seiko_names, "refresh": REFRESH_DAYS, "limit": limit},
     ).fetchall()
 
 

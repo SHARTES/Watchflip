@@ -225,7 +225,8 @@ def update_close_time(conn, lot_id: str, close_time) -> None:
 MONITOR_TIER_SQL = """
     case
       when lower(l.brand) = 'seiko'
-           and concat_ws(' ', l.watch_model, l.title) ~* %(style)s
+           and (concat_ws(' ', l.watch_model, l.title) ~* %(style)s
+                or coalesce(l.description, '') ~* %(style_names)s)
            and (coalesce(l.watch_year between 1960 and 1999, false)
                 or coalesce(l.watch_period ~ '^(196|197|198|199)', false))
         then 1
@@ -279,5 +280,6 @@ def lots_due_for_monitoring(conn, limit: int = 40) -> list[dict[str, Any]]:
         limit %(limit)s
         """,
         {"limit": limit, "target": cfg.target_brand, "candidates": cfg.candidate_keys,
-         "premium": cfg.premium_seiko_pattern, "style": cfg.style_seiko_pattern},
+         "premium": cfg.premium_seiko_pattern, "style": cfg.style_seiko_pattern,
+         "style_names": cfg.style_seiko_names},
     ).fetchall()

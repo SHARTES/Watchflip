@@ -53,6 +53,10 @@ class Config:
         r"dolce|chariot|lassale|credor|exceline|tank|rectang|rechteck|square"
         r"|carr[ée]|tonneau|curved"
     )
+    # The line names alone are specific enough to search the description too:
+    # many listings only say "Seiko - Vintage - <reference>" in the title and
+    # name the line (DOLCE on the dial) further down.
+    style_seiko_names: str = r"dolce|chariot|lassale|lasalle|credor|exceline"
     vintage_year_min: int = 1950
     vintage_year_max: int = 1989
     training_max_price: float = 3000.0
