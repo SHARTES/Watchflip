@@ -13,6 +13,7 @@ import sys
 import comps
 import db
 import poller
+import replies
 import sweeper
 import shortlist
 
@@ -55,6 +56,9 @@ def serve() -> None:
                  id="shortlist", max_instances=1, misfire_grace_time=600)
     sched.add_job(shortlist.remind, "cron", minute="*/5", id="remind",
                    max_instances=1, misfire_grace_time=120)
+    # Prices you reply to an alert in Telegram (replies.py). Telegram only, no browser.
+    sched.add_job(replies.poll, "cron", minute="*/2", id="replies",
+                  max_instances=1, misfire_grace_time=50)
     log.info("scheduler: monitor every 15 min; discover every 2 h and sweep twice an "
              "hour, both paused 17:00–23:00 for the evening closes")
     sched.start()
@@ -67,6 +71,7 @@ COMMANDS = {
     "health": health,
     "serve": serve,
     "comps": comps.run,
+    "replies": replies.poll,
 }
 
 if __name__ == "__main__":

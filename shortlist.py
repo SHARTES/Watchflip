@@ -194,7 +194,7 @@ GRADE_TEXT = {
 }
 # Lots graded worse than this are not alerted at all. "D" alerts everything
 # (graded); "C" drops the feature-tier lots with no comparable ask anywhere.
-MIN_ALERT_GRADE = "D"
+MIN_ALERT_GRADE = "C"      # D dropped on 12 Oct: 6 of 23 alerts in two weeks had no comparable
 SOLD_BY_REF: dict = {}    # logged real sales, filled by load_asks()
 
 # References you never want to see again, whatever the numbers say.
@@ -1126,10 +1126,7 @@ def message(r) -> str:
     if comps:
         out.append("Cheapest comparable for sale: " + ", ".join(_competitor(c) for c in comps))
     else:
-        out.append("No comparable watch for sale found. Search Chrono24 and Willhaben, and log "
-                   "what you see:")
-        ref = r["reference"] if r["reference"] != "—" else "REFERENCE"
-        out.append(f"<code>python market.py add {escape(str(ref))} chrono24 PRICE</code>")
+        out.append("No comparable watch for sale found — check the links below first.")
 
     warn = []
     if r.get("serviced"):
@@ -1160,8 +1157,19 @@ def message(r) -> str:
         links.append(f'<a href="{escape(r["compare"], quote=True)}">eBay for sale</a>')
     links += [f'<a href="{escape(u, quote=True)}">{n}</a>' for n, u in search_links(r["reference"])]
     out.append(" · ".join(links))
+    out.append("Saw prices? Reply to this message: <i>sold 540 575</i> · <i>c24 450</i> · <i>wh 480</i>")
     out.append(f"<code>python explain.py {escape(str(r['lot_id']))}</code>")
     return "\n".join(out)
+
+
+def _remember(resp, lot_id) -> None:
+    """Keep the Telegram message id, so a reply to this alert logs prices for
+    this lot (replies.py)."""
+    try:
+        import replies
+        replies.remember(resp.json().get("result", {}).get("message_id"), str(lot_id))
+    except Exception:
+        log.exception("could not remember the alert message for %s", lot_id)
 
 
 def send_new(out: pd.DataFrame) -> None:
@@ -1202,6 +1210,7 @@ def send_new(out: pd.DataFrame) -> None:
             if not resp.ok:
                 log.warning("telegram refused %s: %s", r["lot_id"], resp.text[:200])
                 continue
+            _remember(resp, r["lot_id"])
             conn.execute(
                 "insert into shortlist_alerts (lot_id, max_bid, p_win, exp_profit, value, grade) "
                 "values (%s, %s, %s, %s, %s, %s) on conflict (lot_id) do nothing",
@@ -1361,6 +1370,7 @@ def remind() -> None:
             if not resp.ok:
                 log.warning("telegram refused reminder %s: %s", r["lot_id"], resp.text[:200])
                 continue
+            _remember(resp, r["lot_id"])
             conn.execute("update shortlist_alerts set reminded_at = now() where lot_id = %s",
                          (r["lot_id"],))
             conn.commit()

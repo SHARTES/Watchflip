@@ -124,20 +124,37 @@ def sold_by_ref() -> dict[str, list[tuple[float, str, bool]]]:
 
 # --------------------------------------------------------------------- CLI
 
+def log_prices(reference: str, channel: str, kind: str, prices, material: str | None = None,
+               serviced: bool = False, condition: str | None = None, note: str | None = None,
+               on: date | None = None) -> list[int]:
+    """Store prices for a reference; returns the new entry ids."""
+    ids = []
+    with db.connect() as conn:
+        _setup(conn)
+        for p in prices:
+            ids.append(conn.execute(
+                "insert into market_comps (reference, channel, kind, price, material, serviced, "
+                "condition, note, seen_on) values (%s, %s, %s, %s, %s, %s, %s, %s, %s) returning id",
+                (reference.strip(), channel.lower(), kind, p, material, serviced,
+                 condition, note, on or date.today())).fetchone()["id"])
+        conn.commit()
+    return ids
+
+
+def drop_ids(ids) -> int:
+    with db.connect() as conn:
+        _setup(conn)
+        n = conn.execute("delete from market_comps where id = any(%s)", (list(ids),)).rowcount
+        conn.commit()
+    return n
+
+
 def add(a) -> None:
     if not model.ref_key(a.reference):
         sys.exit(f"'{a.reference}' does not look like a reference number")
     material = "steel" if a.steel else "plated" if a.plated else "gold" if a.gold else None
     kind = "sold" if a.sold else "ask"
-    with db.connect() as conn:
-        _setup(conn)
-        for p in a.prices:
-            conn.execute(
-                "insert into market_comps (reference, channel, kind, price, material, serviced, "
-                "condition, note, seen_on) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (a.reference.strip(), a.channel.lower(), kind, p, material, a.serviced,
-                 a.cond, a.note, a.on or date.today()))
-        conn.commit()
+    log_prices(a.reference, a.channel, kind, a.prices, material, a.serviced, a.cond, a.note, a.on)
     what = "sold price" if a.sold else "ask"
     print(f"logged {len(a.prices)} {what}{'s' if len(a.prices) > 1 else ''} for {a.reference} "
           f"on {a.channel}: " + ", ".join(f"€{p:.0f}" for p in a.prices)
@@ -162,10 +179,7 @@ def list_(a) -> None:
 
 
 def drop(a) -> None:
-    with db.connect() as conn:
-        _setup(conn)
-        n = conn.execute("delete from market_comps where id = %s", (a.id,)).rowcount
-        conn.commit()
+    n = drop_ids([a.id])
     print(f"removed entry {a.id}" if n else f"no entry {a.id}")
 
 
