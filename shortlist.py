@@ -584,6 +584,19 @@ def ebay_search(ref) -> str | None:
     return "https://www.ebay.de/sch/i.html?_nkw=" + quote_plus(f"Omega {term}")
 
 
+def search_links(ref) -> list[tuple[str, str]]:
+    """One-tap searches for checking a reference yourself: eBay SOLD items
+    (real prices, last ~3 months), Chrono24 and Willhaben asks. Only links —
+    nothing is fetched from these sites."""
+    if not isinstance(ref, str) or not ref.strip() or ref.strip() == "—":
+        return []
+    m = model.DOTTED_REF_RE.search(ref)
+    q = quote_plus(f"Omega {m.group(0) if m else ref.strip()}")
+    return [("eBay sold", f"https://www.ebay.de/sch/i.html?_nkw={q}&LH_Sold=1&LH_Complete=1"),
+            ("Chrono24", f"https://www.chrono24.de/search/index.htm?query={q}"),
+            ("Willhaben", f"https://www.willhaben.at/iad/kaufen-und-verkaufen/marktplatz?keyword={q}")]
+
+
 def eu_status(country) -> str:
     if not isinstance(country, str) or not country.strip():
         return "unknown"
@@ -1127,7 +1140,8 @@ def message(r) -> str:
 
     links = [f'<a href="{escape(r["url"], quote=True)}">Open on Catawiki</a>']
     if isinstance(r.get("compare"), str):
-        links.append(f'<a href="{escape(r["compare"], quote=True)}">Compare on eBay</a>')
+        links.append(f'<a href="{escape(r["compare"], quote=True)}">eBay for sale</a>')
+    links += [f'<a href="{escape(u, quote=True)}">{n}</a>' for n, u in search_links(r["reference"])]
     out.append(" · ".join(links))
     out.append(f"<code>python explain.py {escape(str(r['lot_id']))}</code>")
     return "\n".join(out)
