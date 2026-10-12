@@ -158,6 +158,37 @@ MIN_BIAS_LOTS = 15
 BIAS_INFO = {"bias": FEAT_BIAS, "lots": 0, "measured": False}
 FEAT_MARGIN = 0.35        # stricter than TARGET_MARGIN
 
+# ------------------------------------------- competition and confidence (12 Oct)
+# A buyer who finds the same reference in better condition for less buys that
+# one. So the resale value is checked against the competition, not only
+# averaged from it:
+#   COMPETITION_CAP  the quick-sale price is never planned above the cheapest
+#                    comparable ask — eBay, or one you logged from Chrono24 /
+#                    Willhaben with market.py. Even one or two asks count here:
+#                    they are watches a buyer can pick instead of yours.
+#   logged sales     prices watches really fetched (market.py add --sold): the
+#                    quick-sale price is never planned above their median.
+#   DISAGREE         eBay asks and Catawiki sales more than this far apart →
+#                    use the lower of the two instead of averaging them.
+COMPETITION_CAP = True
+# Which ask is "the competition": the cheapest while there are only a few; from
+# BEAT_SECOND_FROM counted asks on, the second cheapest — one odd listing (worn,
+# wrong crown, priced to dump) should not set the price of a whole reference.
+BEAT_SECOND_FROM = 5
+DISAGREE = 0.25
+AGREE = 0.20
+# Every value gets a confidence grade, shown in the alert:
+GRADE_TEXT = {
+    "A": "High — two or more sources agree",
+    "B": "Good — solid evidence from one source",
+    "C": "Thin — little or conflicting evidence: check Chrono24 and Willhaben yourself",
+    "D": "Weak — no comparable watch found, estimated from similar lots",
+}
+# Lots graded worse than this are not alerted at all. "D" alerts everything
+# (graded); "C" drops the feature-tier lots with no comparable ask anywhere.
+MIN_ALERT_GRADE = "D"
+SOLD_BY_REF: dict = {}    # logged real sales, filled by load_asks()
+
 # References you never want to see again, whatever the numbers say.
 EXCLUDE_REFS = {
     "31858801",     # Seamaster, not to your taste
@@ -359,9 +390,20 @@ def ratio_text() -> str:
 
 class Value(tuple):
     """(value, realism, basis, kind) — unpacks like before — plus .sigma and
-    .list_price (the median comparable ask, when eBay listings exist)."""
+    .list_price (the median comparable ask, when eBay listings exist), and
+    from value_for(): .grade, .beat (cheapest comparable ask), .competitors,
+    .uncapped (before the competition checks), .v1 (the value before 12 Oct)."""
     sigma: float | None = None
     list_price: float | None = None
+    grade: str | None = None
+    beat: float | None = None
+    competitors: list | None = None
+    uncapped: float | None = None
+    v1: float | None = None
+    n_asks: int = 0
+    m_sales: int = 0
+    n_sold: int = 0
+    gap: float | None = None
 
 
 def _value(value, realism, basis, kind, sigma, list_price=None):
@@ -379,8 +421,9 @@ def ebay_stats(lot, by_ref) -> dict | None:
     return s if s is not None and s["n"] >= MIN_REF_LISTINGS else None
 
 
-def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
-    """Expected resale for one lot, from the most specific evidence available.
+def _evidence_value(lot, by_ref, by_line, cw_by_ref, fair=None):
+    """Expected resale for one lot, from the most specific evidence available,
+    before the competition checks in value_for().
 
     Returns (value, realism, description, kind) or None.
       1. live eBay asks for this exact reference, cleaned, lower quarter
@@ -405,22 +448,124 @@ def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
         # Averaging two sources halves the noise, unless they disagree more
         # than their noise explains — then the disagreement is the uncertainty.
         sig = max(0.5 * math.sqrt(sig_e ** 2 + sig_c ** 2), d / 2)
-        return _value(math.sqrt(ve * vc), REALISM_EBAY,
-                      f"eBay €{ve:.0f} ({n} listings) and Catawiki €{vc:.0f} ({m} sales), combined",
-                      "ebay", sig, med)
+        if d > math.log(1 + DISAGREE):
+            # Too far apart to average: one of them is wrong about this watch,
+            # and paying for the optimistic one is the expensive mistake.
+            low = "eBay" if ve < vc else "Catawiki"
+            v = _value(min(ve, vc), REALISM_EBAY,
+                       f"eBay €{ve:.0f} ({n} listings) and Catawiki €{vc:.0f} ({m} sales) "
+                       f"disagree — the lower ({low}) is used", "ebay", sig, med)
+        else:
+            v = _value(math.sqrt(ve * vc), REALISM_EBAY,
+                       f"eBay €{ve:.0f} ({n} listings) and Catawiki €{vc:.0f} ({m} sales), combined",
+                       "ebay", sig, med)
+        v.v1, v.m_sales, v.gap = math.sqrt(ve * vc), m, d
+        return v
     if es is not None:
-        return _value(ve, REALISM_EBAY, f"the cheaper quarter of {n} eBay listings", "ebay", sig_e, med)
+        v = _value(ve, REALISM_EBAY, f"the cheaper quarter of {n} comparable listings", "ebay", sig_e, med)
+        v.v1 = ve
+        return v
     if cw is not None:
-        return _value(vc, REALISM_REF, f"{m} Catawiki sales", "catawiki", sig_c)
+        v = _value(vc, REALISM_REF, f"{m} Catawiki sales", "catawiki", sig_c)
+        v.v1, v.m_sales = vc, m
+        return v
     if USE_FEATURE_TIER and fair is not None and np.isfinite(fair) and fair > 0:
-        return _value(float(fair) * ASK_TO_HAMMER / FEAT_BIAS, REALISM_FEAT,
-                      f"similar lots, which typically fetch €{fair:.0f} at auction", "feature",
-                      BIAS_INFO.get("sigma", 0.20))
+        v = _value(float(fair) * ASK_TO_HAMMER / FEAT_BIAS, REALISM_FEAT,
+                   f"similar lots, which typically fetch €{fair:.0f} at auction", "feature",
+                   BIAS_INFO.get("sigma", 0.20))
+        v.v1 = v[0]
+        return v
     if USE_LINE_FALLBACK:
         line = line_of(lot["watch_model"])
         if line in by_line:
-            return _value(float(by_line[line]), REALISM_LINE, f"{line} line value", "line", 0.35)
+            v = _value(float(by_line[line]), REALISM_LINE, f"{line} line value", "line", 0.35)
+            v.v1 = v[0]
+            return v
     return None
+
+
+def competition(lot, by_ref) -> pd.DataFrame:
+    """Comparable asks for this lot, cheapest first: eBay and logged ones,
+    after the same cleaning as the value (parts, other material or line,
+    serviced dealer stock against an as-is lot, outliers, repeats)."""
+    k = model.ref_key(lot["reference_number"])
+    if not k or k not in by_ref:
+        return pd.DataFrame(columns=["price"])
+    g = by_ref[k]
+    idx = asks.counted(g, asks.lot_material(lot), asks.lot_line(lot), asks.lot_serviced(lot)).index
+    return g.loc[idx].sort_values("price")
+
+
+def sold_for(lot) -> list[float]:
+    """Logged real sale prices of comparable watches (market.py add --sold)."""
+    k = model.ref_key(lot["reference_number"])
+    if not k or k not in SOLD_BY_REF:
+        return []
+    mat, serviced = model.lot_material(lot), asks.lot_serviced(lot)
+    out = []
+    for price, m, s in SOLD_BY_REF[k]:
+        if mat in ("steel", "plated", "gold", "bicolor") and m not in (mat, "unknown", "other"):
+            continue
+        if s and not serviced:
+            continue                  # a serviced watch sold for more than yours will
+        out.append(price)
+    return out
+
+
+def grade_for(kind: str, n_asks: int, m_sales: int, n_sold: int, gap: float | None) -> str:
+    """A = sources agree, B = one solid source, C = thin or conflicting,
+    D = no comparable watch at all (feature-tier value)."""
+    if kind in ("feature", "line"):
+        return "C" if (n_asks or n_sold) else "D"
+    if gap is not None and gap > math.log(1 + DISAGREE):
+        return "C"
+    sources = (n_asks >= MIN_REF_LISTINGS) + (m_sales >= MIN_REF_SALES) + (n_sold >= 1)
+    if sources >= 2 and (gap is None or gap <= math.log(1 + AGREE)) and n_asks + m_sales + n_sold >= 6:
+        return "A"
+    if n_asks >= MIN_REF_LISTINGS or m_sales >= 3 or n_sold >= 2:
+        return "B"
+    return "C"
+
+
+def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
+    """Expected resale for one lot: the evidence value, then checked against
+    the competition (see COMPETITION_CAP). Returns a Value — unpacks as
+    (value, realism, description, kind) — or None.
+
+      1. live asks for this exact reference (eBay + logged), cleaned, lower quarter
+      2. Catawiki sales of this exact reference, scaled up to ask level
+      3. the listing-only model's typical price, scaled up to ask level
+      4. the line-level fallback, only if USE_LINE_FALLBACK is on
+    then: never above the cheapest comparable ask, nor above logged sale prices.
+    """
+    v = _evidence_value(lot, by_ref, by_line, cw_by_ref, fair)
+    if v is None:
+        return None
+    value, realism, basis, kind = v
+    comp = competition(lot, by_ref)
+    sold = sold_for(lot)
+    notes, beat = [], None
+    if len(comp):
+        second = len(comp) >= BEAT_SECOND_FROM
+        beat = float(comp["price"].iloc[1 if second else 0])
+        if COMPETITION_CAP and value * realism > beat:
+            value = beat / realism
+            which = ("the only comparable ask" if len(comp) == 1 else
+                     f"the {'second-' if second else ''}cheapest of {len(comp)} comparable asks")
+            notes.append(f"capped: {which} is €{beat:.0f}")
+    if sold:
+        s = float(np.median(sold))
+        if value * realism > s:
+            value = s / realism
+            notes.append(f"capped: comparable watches really sold for about €{s:.0f}")
+    out = _value(value, realism, basis + ("; " + "; ".join(notes) if notes else ""),
+                 kind, v.sigma, v.list_price)
+    out.uncapped, out.v1, out.beat = v[0], v.v1 if v.v1 is not None else v[0], beat
+    out.n_asks, out.m_sales, out.n_sold, out.gap = len(comp), v.m_sales, len(sold), v.gap
+    out.competitors = [(float(c["price"]), str(c.get("source") or "ebay"), str(c["comp_id"]),
+                        str(c.get("title") or "")) for _, c in comp.head(3).iterrows()]
+    out.grade = grade_for(kind, out.n_asks, out.m_sales, out.n_sold, out.gap)
+    return out
 
 
 def watch_year_text(lot) -> str:
@@ -593,6 +738,12 @@ def load_asks(ref_to_line: dict) -> tuple[dict, dict]:
     watch is not priced from solid-gold listings).
     """
     by_ref = asks.load()
+    SOLD_BY_REF.clear()
+    try:
+        import market
+        SOLD_BY_REF.update(market.sold_by_ref())
+    except Exception:
+        log.exception("logged sale prices could not be read — continuing without them")
     rows = []
     for k, g in by_ref.items():
         v = asks.value(g, "steel")
@@ -667,7 +818,7 @@ def build_live_model(closed: pd.DataFrame, open_: pd.DataFrame):
 # ---------------------------------------------------------------- scoring
 
 def score() -> tuple[pd.DataFrame, dict]:
-    stats = {"window": 0, "target": 0, "filtered": 0, "no_value": 0,
+    stats = {"window": 0, "target": 0, "filtered": 0, "no_value": 0, "weak": 0,
              "past_ceiling": 0, "unlikely": 0, "kept": 0}
 
     open_ = load_open()
@@ -711,6 +862,9 @@ def score() -> tuple[pd.DataFrame, dict]:
             stats["no_value"] += 1
             continue
         value, realism, basis, kind = v
+        if v.grade and v.grade > MIN_ALERT_GRADE:
+            stats["weak"] += 1
+            continue
 
         country = eu_status(lot["seller_country"])
         non_eu = country == "non_eu"
@@ -776,6 +930,8 @@ def score() -> tuple[pd.DataFrame, dict]:
             "has_late_bid": active_late,
             "seen_at": lot.get("last_seen"),
             "serviced": asks.lot_serviced(lot),
+            "grade": v.grade, "beat": v.beat, "competitors": v.competitors or [],
+            "uncapped": v.uncapped,
         })
 
     out = pd.DataFrame(rows)
@@ -793,6 +949,7 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
           f"vintage Omega target: {stats['target']}")
     print(f"skipped — condition below Good: {stats['filtered']}   "
           f"no price reference: {stats['no_value']}   "
+          f"evidence below grade {MIN_ALERT_GRADE}: {stats.get('weak', 0)}   "
           f"already past your ceiling: {stats['past_ceiling']}   "
           f"under {MIN_WIN_PROB:.0%} chance: {stats['unlikely']}")
     if adj:
@@ -852,6 +1009,17 @@ EVIDENCE = {
     "feature": "Weak — no direct comparables, estimated from similar lots",
     "line": "Weak — estimated from the model line as a whole",
 }
+
+
+def _competitor(c) -> str:
+    """One comparable ask for the alert: a link for eBay, a note for a logged one."""
+    from html import escape
+    price, source, comp_id, title = c
+    m = re.search(r"\|(\d+)\|", comp_id)
+    if source == "ebay" and m:
+        return f'<a href="https://www.ebay.de/itm/{m.group(1)}">€{price:,.0f} eBay</a>'
+    when = re.search(r"on (\d+ \w+)\)", title)
+    return f"€{price:,.0f} {escape(source.capitalize())}" + (f" (logged {when.group(1)})" if when else "")
 
 
 def _eur(x: float) -> str:
@@ -918,8 +1086,20 @@ def message(r) -> str:
         out.append(f"If it closes near the likely {_eur(r['p50'])}: {_eur(saved)} more on each")
     out.append("")
 
-    out.append(f"<b>Evidence:</b> {EVIDENCE.get(r['kind'], r['kind'])}")
+    grade = r.get("grade")
+    if grade:
+        out.append(f"<b>Confidence {grade}:</b> {escape(GRADE_TEXT.get(grade, ''))}")
+    else:
+        out.append(f"<b>Evidence:</b> {EVIDENCE.get(r['kind'], r['kind'])}")
     out.append(f"Resale value {_eur(r['value'])}, from {escape(str(r['basis']))}")
+    comps = r.get("competitors") or []
+    if comps:
+        out.append("Cheapest comparable for sale: " + ", ".join(_competitor(c) for c in comps))
+    else:
+        out.append("No comparable watch for sale found. Search Chrono24 and Willhaben, and log "
+                   "what you see:")
+        ref = r["reference"] if r["reference"] != "—" else "REFERENCE"
+        out.append(f"<code>python market.py add {escape(str(ref))} chrono24 PRICE</code>")
 
     warn = []
     if r.get("serviced"):
@@ -928,6 +1108,9 @@ def message(r) -> str:
         warn.append("No service mentioned — a service would cost €150–250 on top")
     if r["kind"] in ("feature", "line"):
         warn.append("No comparable sales — check the photos closely before bidding")
+    if r.get("grade") in ("C", "D"):
+        warn.append("Thin evidence — look this reference up on Chrono24 and Willhaben before "
+                    "you bid; a cheaper one in better condition means skip")
     if non_eu:
         warn.append("Seller outside the EU — import VAT is already included above")
     if r["country"] == "unknown":
@@ -971,6 +1154,8 @@ def send_new(out: pd.DataFrame) -> None:
                 exp_profit numeric(12, 2)
             )""")
         conn.execute("alter table shortlist_alerts enable row level security")
+        conn.execute("alter table shortlist_alerts add column if not exists value numeric(12, 2)")
+        conn.execute("alter table shortlist_alerts add column if not exists grade text")
         sent = {r["lot_id"] for r in
                 conn.execute("select lot_id from shortlist_alerts").fetchall()}
         conn.commit()
@@ -987,10 +1172,10 @@ def send_new(out: pd.DataFrame) -> None:
                 log.warning("telegram refused %s: %s", r["lot_id"], resp.text[:200])
                 continue
             conn.execute(
-                "insert into shortlist_alerts (lot_id, max_bid, p_win, exp_profit) "
-                "values (%s, %s, %s, %s) on conflict (lot_id) do nothing",
+                "insert into shortlist_alerts (lot_id, max_bid, p_win, exp_profit, value, grade) "
+                "values (%s, %s, %s, %s, %s, %s) on conflict (lot_id) do nothing",
                 (r["lot_id"], round(r["max_bid"], 2), round(r["p_win"], 3),
-                 round(r["exp_profit"], 2)),
+                 round(r["exp_profit"], 2), round(r["value"], 2), r.get("grade")),
             )
             conn.commit()
         log.info("sent %d new lots to Telegram", len(fresh))

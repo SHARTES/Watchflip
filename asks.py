@@ -264,7 +264,11 @@ def value_stats(listings: pd.DataFrame, material: str, line: str | None = None,
 
 
 def load() -> dict[str, pd.DataFrame]:
-    """Live eBay listings per normalised reference: {ref_key: listings}."""
+    """Live listings per normalised reference: {ref_key: listings}.
+
+    eBay listings from comps, plus the asks you logged yourself from Chrono24,
+    Willhaben and elsewhere (market.py). `source` says which is which.
+    """
     import db
     with db.connect() as conn:
         rows = conn.execute(
@@ -272,6 +276,15 @@ def load() -> dict[str, pd.DataFrame]:
             "where disappeared_at is null and price > 0"
         ).fetchall()
     a = pd.DataFrame(rows)
+    if not a.empty:
+        a["source"] = "ebay"
+    try:
+        import market
+        logged = market.as_listings()
+    except Exception:
+        logged = pd.DataFrame()
+    if len(logged):
+        a = pd.concat([a, logged], ignore_index=True) if len(a) else logged
     if a.empty:
         return {}
     a["k"] = a["query_reference"].map(model.ref_key)

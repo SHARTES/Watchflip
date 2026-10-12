@@ -56,6 +56,8 @@ where l.lot_id = %s
 
 
 def ebay_link(comp_id: str) -> str:
+    if re.fullmatch(r"m\d+", str(comp_id)):
+        return f"logged by you — python market.py list (entry {str(comp_id)[1:]})"
     m = re.search(r"\|(\d+)\|", str(comp_id))
     return f"https://www.ebay.de/itm/{m.group(1)}" if m else str(comp_id)
 
@@ -153,7 +155,8 @@ def main(arg: str) -> None:
         no_out = asks.drop_outliers(asks_df.loc[keep, "price"])
         kept = asks.drop_repeats(no_out)
         median = float(asks_df["price"].median())
-        print(f"1. eBay listings for this reference — {len(asks_df)} live, median €{median:.0f}")
+        print(f"1. Listings for this reference (eBay + logged by you) — {len(asks_df)} live, "
+              f"median €{median:.0f}")
         clean_med = float(kept.median()) if len(kept) else float("nan")
         for i, a in asks_df.iterrows():
             f = flags_for(a, material, float(no_out.median()) if len(no_out) else float("nan"), line)
@@ -247,6 +250,19 @@ def main(arg: str) -> None:
         ref = sl.SIGMA_REF.get("evidence")
         typ = f" (typical ±{ref:.0%})" if ref is not None and kind != "feature" else ""
         print(f"   uncertainty of this value: ±{sigma:.0%}{typ} → required margin {margin:.0%}")
+    if getattr(v, "uncapped", None) is not None and v.uncapped > value + 0.5:
+        print(f"   before the competition check: €{v.uncapped:.0f} (quick sale €{v.uncapped * realism:.0f})")
+    comps = getattr(v, "competitors", None) or []
+    if comps:
+        print("   cheapest comparable asks: "
+              + ", ".join(f"€{p:.0f} {s}" for p, s, _, _ in comps)
+              + (f" → the quick-sale price stays at or below €{v.beat:.0f}"
+                 if sl.COMPETITION_CAP and v.beat else ""))
+    else:
+        print("   no comparable ask anywhere — check Chrono24 / Willhaben and log what you find:")
+        print(f"   python market.py add {r['reference_number'] or 'REFERENCE'} chrono24 PRICE")
+    if getattr(v, "grade", None):
+        print(f"   confidence {v.grade}: {sl.GRADE_TEXT[v.grade]}")
     print()
 
     # 4. cost chain

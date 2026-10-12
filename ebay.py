@@ -140,6 +140,10 @@ class EbayClient:
             "q": query,
             "limit": str(min(limit, 200)),
             "category_ids": CATEGORY_WRISTWATCHES,
+            # Fixed-price listings only (12 Oct). An auction's "price" is its
+            # current bid, not an ask: it dragged the lower quarter down and
+            # would set the competition cap at a bid that is still climbing.
+            "filter": "buyingOptions:{FIXED_PRICE}",
         }
         r = self._session.get(BROWSE_URL, headers=self._headers(),
                               params=params, timeout=45)
