@@ -225,9 +225,10 @@ def audit(a) -> None:
           f"live shortlist; {no_evidence} lots here)\n")
     if len(ev):
         cut = (capped["after"] / capped["before"] - 1)
-        print("New checks: never above the competition (cheapest comparable ask, second")
-        print("cheapest from 5 on) or logged sale prices;")
-        print("eBay and Catawiki more than 25% apart → the lower one instead of the average")
+        print("New checks: never above the competition (asks under half the value ignored;")
+        print("the cheapest of a few, about the 12% point of many) or logged sale prices;")
+        print("eBay and Catawiki more than 25% apart → the lower one, unless eBay sits below")
+        print("even the auction price (then eBay is ignored)")
         print(f"   lots valued from evidence: {len(ev)}")
         print(f"   valued lower than before:  {len(capped)} ({len(capped) / len(ev):.0%})"
               + (f", median {cut.median():.0%}, largest {cut.min():.0%}" if len(capped) else ""))

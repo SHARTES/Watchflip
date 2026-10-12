@@ -171,10 +171,18 @@ FEAT_MARGIN = 0.35        # stricter than TARGET_MARGIN
 #   DISAGREE         eBay asks and Catawiki sales more than this far apart →
 #                    use the lower of the two instead of averaging them.
 COMPETITION_CAP = True
-# Which ask is "the competition": the cheapest while there are only a few; from
-# BEAT_SECOND_FROM counted asks on, the second cheapest — one odd listing (worn,
-# wrong crown, priced to dump) should not set the price of a whole reference.
+# Which ask is "the competition". First, asks far below the evidence value
+# (under COMP_FLOOR of the quick-sale price) are left out: at 40% of what the
+# same reference fetches, a listing is a parts watch, a broken one, a mislabel
+# or an auction bid — not a watch your buyer would pick instead of yours
+# (the 12 Oct audit: one €150 ask had cut an €843 value by 82%). Of the rest:
+# the cheapest while there are fewer than BEAT_SECOND_FROM; above that, the
+# ask with about BEAT_SHARE of the others below it (at least the second
+# cheapest) — with 30 listings a couple will always be cheaper, and being
+# priced under ~88% of the market still sells in weeks.
+COMP_FLOOR = 0.5
 BEAT_SECOND_FROM = 5
+BEAT_SHARE = 0.12
 DISAGREE = 0.25
 AGREE = 0.20
 # Every value gets a confidence grade, shown in the alert:
@@ -448,7 +456,14 @@ def _evidence_value(lot, by_ref, by_line, cw_by_ref, fair=None):
         # Averaging two sources halves the noise, unless they disagree more
         # than their noise explains — then the disagreement is the uncertainty.
         sig = max(0.5 * math.sqrt(sig_e ** 2 + sig_c ** 2), d / 2)
-        if d > math.log(1 + DISAGREE):
+        if d > math.log(1 + DISAGREE) and ve < cw[0]:
+            # Asking prices below what the same watch fetches at auction are
+            # not retail evidence — auction bids, parts or mislabels. Trust the
+            # sales; the grade still shows the conflict.
+            v = _value(vc, REALISM_REF,
+                       f"{m} Catawiki sales (eBay asks at €{ve:.0f} are below even the auction "
+                       f"price — ignored)", "catawiki", sig_c)
+        elif d > math.log(1 + DISAGREE):
             # Too far apart to average: one of them is wrong about this watch,
             # and paying for the optimistic one is the expensive mistake.
             low = "eBay" if ve < vc else "Catawiki"
@@ -545,13 +560,15 @@ def value_for(lot, by_ref, by_line, cw_by_ref, fair=None):
     comp = competition(lot, by_ref)
     sold = sold_for(lot)
     notes, beat = [], None
+    comp = comp[comp["price"] >= COMP_FLOOR * value * realism] if len(comp) else comp
     if len(comp):
-        second = len(comp) >= BEAT_SECOND_FROM
-        beat = float(comp["price"].iloc[1 if second else 0])
+        n = len(comp)
+        k = 0 if n < BEAT_SECOND_FROM else max(1, round(BEAT_SHARE * n) - 1)
+        beat = float(comp["price"].iloc[k])
         if COMPETITION_CAP and value * realism > beat:
             value = beat / realism
-            which = ("the only comparable ask" if len(comp) == 1 else
-                     f"the {'second-' if second else ''}cheapest of {len(comp)} comparable asks")
+            rank = {0: "cheapest", 1: "second-cheapest", 2: "third-cheapest"}.get(k, f"{k + 1}th-cheapest")
+            which = "the only comparable ask" if n == 1 else f"the {rank} of {n} comparable asks"
             notes.append(f"capped: {which} is €{beat:.0f}")
     if sold:
         s = float(np.median(sold))
