@@ -28,7 +28,7 @@ import shortlist as sl
 from config import cfg
 
 # ------------------------------------------------------------------ settings
-BUDGET_ALL_IN = 700.0      # max total cost per watch, fees and shipping included
+BUDGET_ALL_IN = 1000.0     # max total cost per watch, fees and shipping included
 TEST_DAYS = 7              # replay window; everything before it is training data
 CAPITAL = 1500.0
 
