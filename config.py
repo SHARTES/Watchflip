@@ -22,7 +22,7 @@ class Config:
         ("https://www.catawiki.com/en/x/1337", 6),    # Longines
         ("https://www.catawiki.com/en/x/1453", 4),    # Universal Genève
         ("https://www.catawiki.com/en/x/1341", 4),    # Tissot
-        ("https://www.catawiki.com/en/c/333-watches?l2_categories=855", 4),  # Cartier (data only, 12 Oct)
+        ("https://www.catawiki.com/en/c/333-watches?l2_categories=855", 10),  # Cartier (data only; page 4 was still full on 14 Oct)
         ("https://www.catawiki.com/en/c/333-wristwatches", 4),
     )
 
