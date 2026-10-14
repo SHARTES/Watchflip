@@ -42,7 +42,10 @@ def main() -> None:
     p.add_argument("--min", type=int, default=4, help="minimum sales of a reference (default 4)")
     p.add_argument("--weeks", type=float, default=None, help="look back this many weeks")
     p.add_argument("--top", type=int, default=30)
+    p.add_argument("--channel", default=sl.PLAN_CHANNEL, choices=list(sl.CHANNELS),
+                   help='plan the max bid on this channel (default Chrono24; "in person" = 0%% fees)')
     a = p.parse_args()
+    sl.PLAN_CHANNEL = a.channel
 
     closed = model.load()
     by_ref, by_line = sl.load_asks({})
@@ -76,8 +79,10 @@ def main() -> None:
         profit = (sl.keep(quick, "in person") - sl.landed(float(under.median()), False)
                   if len(under) else np.nan)
         mats = g.apply(model.lot_material, axis=1)
+        m = model.DOTTED_REF_RE.search(str(lot["reference_number"]))
         rows.append({
-            "ref": str(lot["reference_number"])[:14], "line": sl.line_of(lot["watch_model"]),
+            "ref": (f"{m.group(1)}.{m.group(2)}" if m else str(lot["reference_number"]))[:14],
+            "line": sl.line_of(lot["watch_model"]),
             "n": len(g), "per_wk": len(g) / weeks, "hammer": prices.median(),
             "resale": quick, "grade": v.grade, "max": ceiling,
             "under_wk": len(under) / weeks, "profit": profit,
@@ -90,7 +95,8 @@ def main() -> None:
     df = pd.DataFrame(rows).sort_values("eur_wk", ascending=False)
 
     print(f"Vintage-Omega references with {a.min}+ sales over {weeks:.1f} weeks "
-          f"({len(df)} valued, {no_value} without enough evidence to value)\n")
+          f"({len(df)} valued, {no_value} without enough evidence to value)")
+    print(f"Max bid planned on: {sl.PLAN_CHANNEL}\n")
     print(f"{'#':>3} {'reference':<15}{'line':<14}{'sold/wk':>8}{'hammer':>8}{'resale':>8}{'grade':>6}"
           f"{'max bid':>8}{'≤max/wk':>8}{'profit':>8}{'€/wk':>7}{'steel':>7}")
     for i, (_, r) in enumerate(df.head(a.top).iterrows(), 1):

@@ -40,6 +40,7 @@ import time
 
 import db
 import ebay
+import model
 from config import cfg
 
 log = logging.getLogger("comps")
@@ -202,7 +203,12 @@ def run(limit: int = MAX_QUERIES_PER_RUN) -> None:
     with db.connect() as conn:
         for t in targets:
             brand, ref = t["brand"], t["reference_number"]
-            query = f"{brand} {ref}"
+            # Search eBay for the clean reference: sellers glue the calibre or
+            # words on ("CAL.625REF.111.0104", "Automatic Ref:166.0173"), and
+            # eBay matches those poorly. Stored under the lot's own text, so
+            # everything that joins on it keeps working.
+            m = model.DOTTED_REF_RE.search(str(ref))
+            query = f"{brand} {m.group(1)}.{m.group(2)}" if m else f"{brand} {ref}"
 
             try:
                 items, source = client.search_sold(query, limit=PAGE_LIMIT)
