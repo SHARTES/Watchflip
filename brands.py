@@ -180,11 +180,66 @@ def detail(df: pd.DataFrame, brand: str) -> None:
     print(f"no reference number given: {s['reference_number'].isna().mean():.0%} of sales")
 
 
+# Cartier by model family, read from the title and Catawiki's model field.
+# Order matters: "Must de Cartier Tank" is a Must Tank, not a plain Tank.
+CARTIER_LINES = (
+    ("Must Tank (vermeil)", r"must.{0,25}tank|tank.{0,25}must"),
+    ("Must 21", r"must.{0,15}\b21\b|\b21\b.{0,12}(must|chronoscaph)"),
+    ("Must Colisée", r"colis[ée]e"),
+    ("Must Vendôme", r"vend[oô]me"),
+    ("Must (other)", r"\bmust\b"),
+    ("Tank Française", r"fran[cç]aise"),
+    ("Tank Solo", r"tank solo"),
+    ("Tank Américaine", r"am[ée]ricaine"),
+    ("Tank (other)", r"\btank\b"),
+    ("Santos", r"santos"),
+    ("Panthère", r"panth[eè]re"),
+    ("Pasha", r"pasha"),
+    ("Ronde", r"ronde"),
+    ("Ballon Bleu", r"ballon"),
+)
+
+
+def cartier(df: pd.DataFrame) -> None:
+    """Every Cartier result, any gender and any era, by model family —
+    Cartier's affordable vintage is mostly women's and 1980s–90s, which the
+    vintage men's/unisex filter of the other views would hide."""
+    c = df[df["brand_k"].str.contains("cartier", regex=False)]
+    s = c[c["sold"] == True]
+    if s.empty:
+        print("No Cartier results yet.")
+        return
+    text = (s["watch_model"].fillna("") + " " + s["title"].fillna("")).str.lower()
+    fam = pd.Series("other", index=s.index)
+    for name, rx in reversed(CARTIER_LINES):           # first match wins
+        fam[text.str.contains(rx, regex=True)] = name
+    s = s.assign(fam=fam)
+    cap = max_hammer()
+    print(f"Cartier: {len(s)} sold of {len(c)} closed "
+          f"({s['close_time'].min():%d %b} → {s['close_time'].max():%d %b}) · "
+          f"budget hammer up to about €{cap:.0f}\n")
+    print(f"   {'model family':<22}{'sold':>5}{'median':>8}{'range':>16}{'≤ budget':>10}   gender")
+    order = [n for n, _ in CARTIER_LINES] + ["other"]
+    for name in order:
+        g = s[s["fam"] == name]
+        if g.empty:
+            continue
+        p = g["final_price"]
+        genders = " ".join(f"{k[:1]}{v}" for k, v in g["gender"].fillna("?").value_counts().items())
+        print(f"   {name:<22}{len(g):>5}{p.median():>8.0f}{f'€{p.min():.0f}–{p.max():.0f}':>16}"
+              f"{int((p <= cap).sum()):>10}   {genders}")
+    print("\n   (gender: m men, w women, u unisex)")
+    print("\nResale check: log what Must Tanks really sell for, e.g.")
+    print("   python market.py add 590005 ebay PRICE --sold   ·   python market.py add 590005 chrono24 PRICE")
+
+
 if __name__ == "__main__":
     data = load()
     if data.empty:
         sys.exit("No closed lots yet.")
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "cartier":
+        cartier(data)
+    elif len(sys.argv) > 1:
         detail(data, " ".join(sys.argv[1:]))
     else:
         overview(data)
