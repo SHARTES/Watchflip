@@ -62,6 +62,22 @@ class Config:
     # watches (8 Oct: each had 4+ lots, half or more named Dolce/Exceline/…).
     # Catches "Seiko - Vintage - 5E31-5000" listings that name no line at all.
     style_seiko_calibers: str = r"^(8J41|5E31|9021|8N41|1221|9521|7321|7741|7731|9531)-"
+    # Focus (15 Oct): the models Artem specialises in. With focus_only, alerts
+    # cover only these — any gender, any era — and they get monitor time and
+    # eBay comparables before everything else. A reference matches in the
+    # reference field or the title, with or without the dot ("166.0173" =
+    # "1660173" = "Ref.166.0173.366.0832").
+    focus_refs: tuple = (
+        "166.0173", "166.041", "166.0117",                 # Genève automatics
+        "166.0216", "166.0202", "166.010", "166.0213",     # Seamaster automatics
+        "135.011", "135.041",                              # Genève hand-wound
+        "511.0458",                                        # the small Omega "tank"
+    )
+    # Families matched by name rather than reference (regex, title and model).
+    focus_patterns: tuple = (
+        r"pre.?bond|seamaster.{0,30}professional.{0,15}200",   # pre-Bond Seamaster 200m
+    )
+    focus_only: bool = True
     vintage_year_min: int = 1950
     vintage_year_max: int = 1989
     training_max_price: float = 3000.0
@@ -79,6 +95,12 @@ class Config:
         import unicodedata
         return ["".join(c for c in unicodedata.normalize("NFKD", b) if not unicodedata.combining(c)).lower()
                 for b in self.candidate_brands]
+
+    @property
+    def focus_regex(self) -> str:
+        """One pattern for Python (re, case-insensitive) and PostgreSQL (~*)."""
+        refs = [r"(^|[^0-9])" + r.replace(".", r"[.\s-]?") + r"([^0-9]|$)" for r in self.focus_refs]
+        return "|".join(refs + list(self.focus_patterns)) or "a^"     # "a^" never matches
 
     @property
     def max_entry_bid(self) -> float:

@@ -224,6 +224,9 @@ def update_close_time(conn, lot_id: str, close_time) -> None:
 # else, which still feeds the price model with what is left.
 MONITOR_TIER_SQL = """
     case
+      when lower(l.brand) = lower(%(target)s)
+           and concat_ws(' ', l.reference_number, l.watch_model, l.title) ~* %(focus)s
+        then 0
       when lower(l.brand) = 'seiko'
            and (concat_ws(' ', l.watch_model, l.title) ~* %(style)s
                 or coalesce(l.description, '') ~* %(style_names)s
@@ -235,7 +238,7 @@ MONITOR_TIER_SQL = """
                 and (coalesce(l.watch_year between 1950 and 1989, false)
                      or coalesce(l.watch_period ~ '^(1950|1960|1970|1980)', false)))
         then 2
-      when lower(l.brand) = lower(%(target)s) then 0
+      when lower(l.brand) = lower(%(target)s) then %(omega_tier)s
       when lower(translate(l.brand, 'èéêÈÉÊ', 'eeeeee')) = any(%(candidates)s)
            and (lower(l.brand) <> 'seiko'
                 or concat_ws(' ', l.watch_model, l.title, l.reference_number) ~* %(premium)s)
@@ -282,5 +285,6 @@ def lots_due_for_monitoring(conn, limit: int = 40) -> list[dict[str, Any]]:
         """,
         {"limit": limit, "target": cfg.target_brand, "candidates": cfg.candidate_keys,
          "premium": cfg.premium_seiko_pattern, "style": cfg.style_seiko_pattern,
-         "style_names": cfg.style_seiko_names, "style_cals": cfg.style_seiko_calibers},
+         "style_names": cfg.style_seiko_names, "style_cals": cfg.style_seiko_calibers,
+         "focus": cfg.focus_regex, "omega_tier": 1 if cfg.focus_only else 0},
     ).fetchall()

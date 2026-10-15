@@ -4,6 +4,7 @@
     python models.py --min 3      # include references with 3+ sales (default 4)
     python models.py --weeks 6    # look back 6 weeks (default: everything)
     python models.py --top 40
+    python models.py --focus      # only your focus models (config.focus_refs), any gender/era
 
 For every reference that sold often enough on Catawiki, using the same
 valuation as the alerts (eBay + logged prices, Catawiki sales, competition
@@ -42,6 +43,7 @@ def main() -> None:
     p.add_argument("--min", type=int, default=4, help="minimum sales of a reference (default 4)")
     p.add_argument("--weeks", type=float, default=None, help="look back this many weeks")
     p.add_argument("--top", type=int, default=30)
+    p.add_argument("--focus", action="store_true", help="only your focus models, from 2 sales on")
     p.add_argument("--channel", default=sl.PLAN_CHANNEL, choices=list(sl.CHANNELS),
                    help='plan the max bid on this channel (default Chrono24; "in person" = 0%% fees)')
     a = p.parse_args()
@@ -53,7 +55,9 @@ def main() -> None:
     sl.calibrate_ratio(closed, by_ref)
     sl.calibrate_margin(closed, by_ref, cw)
 
-    t = closed[model.target_mask(closed)].copy()
+    if a.focus:
+        a.min = min(a.min, 2)
+    t = closed[model.focus_mask(closed) if a.focus else model.target_mask(closed)].copy()
     if a.weeks:
         t = t[t["close_time"] > t["close_time"].max() - pd.Timedelta(weeks=a.weeks)]
     t = t[t.apply(sl.passes_filters, axis=1)]
@@ -94,7 +98,7 @@ def main() -> None:
         return
     df = pd.DataFrame(rows).sort_values("eur_wk", ascending=False)
 
-    print(f"Vintage-Omega references with {a.min}+ sales over {weeks:.1f} weeks "
+    print(f"{'Your focus models' if a.focus else 'Vintage-Omega references'} with {a.min}+ sales over {weeks:.1f} weeks "
           f"({len(df)} valued, {no_value} without enough evidence to value)")
     print(f"Max bid planned on: {sl.PLAN_CHANNEL}\n")
     print(f"{'#':>3} {'reference':<15}{'line':<14}{'sold/wk':>8}{'hammer':>8}{'resale':>8}{'grade':>6}"

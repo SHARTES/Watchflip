@@ -97,22 +97,26 @@ def references_to_poll(conn, limit: int) -> list[dict]:
                          or coalesce(l.description, '') ~* %(style_names)s
                          or coalesce(l.reference_number, '') ~* %(style_cals)s)
                     and (l.watch_year between 1960 and 1999
-                         or l.watch_period ~ '^(196|197|198|199)')))
+                         or l.watch_period ~ '^(196|197|198|199)'))
+                -- Your focus models: any gender, any era.
+                or (l.brand ilike %(target)s
+                    and concat_ws(' ', l.reference_number, l.watch_model, l.title) ~* %(focus)s))
           and l.reference_number is not null
-          and l.reference_number ~ '^[0-9]'
+          and (l.reference_number ~ '^[0-9]' or l.reference_number ~ '[0-9]{3}[.][0-9]{3,4}')
           and length(l.reference_number) between 4 and 20
           and r.lot_id is null
           and l.close_time > now()
           and (q.last_run_at is null
                or q.last_run_at < now() - make_interval(days => %(refresh)s))
         group by 1, 2
-        order by (l.brand ilike %(target)s) desc, min(l.close_time)
+        order by bool_or(concat_ws(' ', l.reference_number, l.watch_model, l.title) ~* %(focus)s) desc,
+                 (l.brand ilike %(target)s) desc, min(l.close_time)
         limit %(limit)s
         """,
         {"target": cfg.target_brand, "candidates": cfg.candidate_keys,
          "premium": cfg.premium_seiko_pattern, "style": cfg.style_seiko_pattern,
          "style_names": cfg.style_seiko_names, "style_cals": cfg.style_seiko_calibers,
-         "refresh": REFRESH_DAYS, "limit": limit},
+         "focus": cfg.focus_regex, "refresh": REFRESH_DAYS, "limit": limit},
     ).fetchall()
 
 

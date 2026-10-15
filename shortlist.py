@@ -195,6 +195,9 @@ GRADE_TEXT = {
 # Lots graded worse than this are not alerted at all. "D" alerts everything
 # (graded); "C" drops the feature-tier lots with no comparable ask anywhere.
 MIN_ALERT_GRADE = "C"      # D dropped on 12 Oct: 6 of 23 alerts in two weeks had no comparable
+# Your focus models (config.focus_refs) are alerted even at grade D: you know
+# them, and the alert's links and warnings let you judge the rest yourself.
+MIN_ALERT_GRADE_FOCUS = "D"
 SOLD_BY_REF: dict = {}    # logged real sales, filled by load_asks()
 
 # References you never want to see again, whatever the numbers say.
@@ -874,7 +877,8 @@ def score() -> tuple[pd.DataFrame, dict]:
     calibrate_feature_bias(live, by_ref)
     calibrate_margin(closed, by_ref, cw_by_ref)
 
-    tm = model.target_mask(open_b)
+    fm = model.focus_mask(open_b)
+    tm = fm if cfg.focus_only else (model.target_mask(open_b) | fm)
     stats["target"] = int(tm.sum())
 
     rows = []
@@ -892,7 +896,7 @@ def score() -> tuple[pd.DataFrame, dict]:
             stats["no_value"] += 1
             continue
         value, realism, basis, kind = v
-        if v.grade and v.grade > MIN_ALERT_GRADE:
+        if v.grade and v.grade > (MIN_ALERT_GRADE_FOCUS if fm[i] else MIN_ALERT_GRADE):
             stats["weak"] += 1
             continue
 
@@ -976,7 +980,7 @@ def score() -> tuple[pd.DataFrame, dict]:
 def print_table(out: pd.DataFrame, stats: dict) -> None:
     adj, counts = stats.get("calibration", ({}, {}))
     print(f"lots closing within {WINDOW_HOURS} h: {stats['window']}   "
-          f"vintage Omega target: {stats['target']}")
+          f"{'your focus models' if cfg.focus_only else 'vintage Omega target'}: {stats['target']}")
     print(f"skipped — condition below Good: {stats['filtered']}   "
           f"no price reference: {stats['no_value']}   "
           f"evidence below grade {MIN_ALERT_GRADE}: {stats.get('weak', 0)}   "

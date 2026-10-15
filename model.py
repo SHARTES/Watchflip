@@ -212,6 +212,17 @@ def ref_key(ref) -> str | None:
     return k if len(k) >= 4 else None
 
 
+def focus_mask(df: pd.DataFrame) -> np.ndarray:
+    """Omega lots of the models in focus (config.focus_refs / focus_patterns),
+    any gender and any era."""
+    from config import cfg
+    rx = re.compile(cfg.focus_regex, re.I)
+    text = (df["reference_number"].fillna("").astype(str) + " "
+            + df["watch_model"].fillna("").astype(str) + " " + df["title"].fillna("").astype(str))
+    brand = df["brand"].astype(str).str.lower() == cfg.target_brand.lower()
+    return (brand & text.map(lambda t: bool(rx.search(t)))).to_numpy()
+
+
 def target_mask(df: pd.DataFrame) -> np.ndarray:
     """Vintage men's and unisex Omega — the watches actually being bought."""
     era = (df["watch_year"].between(1950, 1989)
