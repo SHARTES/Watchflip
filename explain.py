@@ -95,11 +95,12 @@ def cost_chain(value: float, realism: float, margin: float, non_eu: bool, bid: f
           + "".join(f"{'at ' + eur(p):>11}" for p in cols))
     for c, s in sl.CHANNELS.items():
         fee = f"{s['fee']:.1%}" + (f"+€{s['fixed']:.2f}" if s["fixed"] else "")
-        name = c + (" ← max bid planned here" if c == sl.PLAN_CHANNEL else "")
+        planned = c == sl.PLAN_CHANNEL or (sl.PLAN_CHANNEL == "mix" and c in sl.PLAN_MIX)
+        name = c + (" ← in the max-bid plan" if planned else "")
         print(f"   {name:<34}{fee:>12}{eur(s['ship']):>10}"
               + "".join(f"{eur(sl.keep(p, c)):>11}" for p in cols))
     print()
-    row(f"planning net: {sl.PLAN_CHANNEL} at €{sale:,.0f} − {sl.WARRANTY_RESERVE:.0%} reserve "
+    row(f"planning net: {sl.plan_name()} at €{sale:,.0f} − {sl.WARRANTY_RESERVE:.0%} reserve "
         f"(€{sl.WARRANTY_RESERVE * sale:,.0f})", f"€{net:,.0f}")
     print("   (the reserve is the average cost of repairs and returns — not paid on")
     print("    every watch, so it is left out of the cash profits below)")

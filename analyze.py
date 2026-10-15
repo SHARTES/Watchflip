@@ -236,9 +236,8 @@ def report_replay(df, days):
     print(f"C. REPLAY — last {days:.0f} days, budget €{BUDGET_ALL_IN:.0f}, moderate settings")
     print(f"   {sl.ratio_text()}")
     print(f"   {sl.bias_text()}")
-    c = sl.CHANNELS[sl.PLAN_CHANNEL]
-    print(f"   profit planned on {sl.PLAN_CHANNEL} (fee {c['fee']:.1%} + €{c['fixed'] + c['ship']:.0f}) "
-          f"after a {sl.WARRANTY_RESERVE:.0%} reserve; inbound shipping €{cfg.expected_inbound_shipping:.0f}")
+    print(f"   profit planned on {sl.plan_name()} after a {sl.WARRANTY_RESERVE:.0%} reserve; "
+          f"inbound shipping €{cfg.expected_inbound_shipping:.0f}")
     for k, (r, m) in SETTINGS.items():
         print(f"   {k:<9} resale {r:.0%} of value, margin {m:.0%}")
     print()

@@ -98,7 +98,20 @@ CHANNELS = {
 # The max bid is planned on this channel: the big market you can always fall
 # back to if nobody local buys. Selling in person is then upside. Once
 # trade.py shows where your sales really happen, plan on that channel.
-PLAN_CHANNEL = "Chrono24"
+PLAN_CHANNEL = "mix"
+# "mix" plans on the weighted average of these channels. 15 Oct: half in person,
+# half Chrono24 — local buyers pay no fees, but while the Instagram audience is
+# small many watches will still go through a platform. Move the weights toward
+# "in person" as trade.py shows more local sales; set PLAN_CHANNEL to one
+# channel name to plan on that alone.
+PLAN_MIX = {"in person": 0.5, "Chrono24": 0.5}
+
+
+def plan_name(channel: str | None = None) -> str:
+    ch = channel or PLAN_CHANNEL
+    if ch == "mix":
+        return "a mix of " + " and ".join(f"{w:.0%} {c}" for c, w in PLAN_MIX.items())
+    return ch
 
 # Expected cost of what goes wrong after you buy — a return, a regulation, a
 # crystal, a watch that stops a week after the sale — as a share of the sale
@@ -650,6 +663,8 @@ def hammer_for(cost: float, non_eu: bool) -> float:
 def keep(price: float, channel: str) -> float:
     """What you are left with from a sale at `price` on `channel`, after the
     platform fee and shipping — the money that reaches you."""
+    if channel == "mix":
+        return sum(w * keep(price, c) for c, w in PLAN_MIX.items())
     c = CHANNELS[channel]
     return price * (1 - c["fee"]) - c["fixed"] - c["ship"]
 
@@ -1000,7 +1015,7 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
         print("Nothing worth a look right now.")
         return
     print(f"'if won' = profit if you win at your max bid (the worst case), selling on "
-          f"{PLAN_CHANNEL} at the quick-sale price, after the {WARRANTY_RESERVE:.0%} reserve;")
+          f"{plan_name()} at the quick-sale price, after the {WARRANTY_RESERVE:.0%} reserve;")
     print("'exp. €' = that profit × the chance of winning, used for ranking.\n")
 
     print(f"{'closes':>7}  {'line':<15}{'ref':<14}{'now':>6}{'likely':>8}"
@@ -1032,7 +1047,7 @@ def breakdown(r) -> str:
     """One line showing where the planning number comes from."""
     sale = r["value"] * r["realism"]
     return (f"value €{r['value']:.0f} × {r['realism']:.0%} = quick sale €{sale:.0f} → "
-            f"net €{r['net_sale']:.0f} on {PLAN_CHANNEL} after fee, shipping + "
+            f"net €{r['net_sale']:.0f} on {plan_name()} after fee, shipping + "
             f"{WARRANTY_RESERVE:.0%} reserve · max bid €{r['max_bid']:.0f} keeps {r['margin']:.0%} margin"
             + (f" (uncertainty ±{r['sigma']:.0%})" if r.get("sigma") is not None else ""))
 
@@ -1113,7 +1128,7 @@ def message(r) -> str:
         out.append(f"Quick-sale price about {_eur(sale)}")
     profits = " · ".join(f"{c} {_eur(p)}" for c, p in channel_profits(sale, r["landed_at_max"]))
     out.append(f"Profit if it sells for {_eur(sale)}: <b>{profits}</b>")
-    out.append(f"The max bid still keeps {margin:.0%} selling on {PLAN_CHANNEL}, "
+    out.append(f"The max bid still keeps {margin:.0%} selling on {plan_name()}, "
                f"after a {WARRANTY_RESERVE:.0%} reserve for repairs and returns")
     if r["p50"] < r["max_bid"] * 0.95:
         saved = r["landed_at_max"] - landed(r["p50"], non_eu)

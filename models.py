@@ -44,8 +44,8 @@ def main() -> None:
     p.add_argument("--weeks", type=float, default=None, help="look back this many weeks")
     p.add_argument("--top", type=int, default=30)
     p.add_argument("--focus", action="store_true", help="only your focus models, from 2 sales on")
-    p.add_argument("--channel", default=sl.PLAN_CHANNEL, choices=list(sl.CHANNELS),
-                   help='plan the max bid on this channel (default Chrono24; "in person" = 0%% fees)')
+    p.add_argument("--channel", default=sl.PLAN_CHANNEL, choices=list(sl.CHANNELS) + ["mix"],
+                   help='plan the max bid on this channel (default: the shortlist\'s, "mix")')
     a = p.parse_args()
     sl.PLAN_CHANNEL = a.channel
 
@@ -100,7 +100,7 @@ def main() -> None:
 
     print(f"{'Your focus models' if a.focus else 'Vintage-Omega references'} with {a.min}+ sales over {weeks:.1f} weeks "
           f"({len(df)} valued, {no_value} without enough evidence to value)")
-    print(f"Max bid planned on: {sl.PLAN_CHANNEL}\n")
+    print(f"Max bid planned on: {sl.plan_name()}\n")
     print(f"{'#':>3} {'reference':<15}{'line':<14}{'sold/wk':>8}{'hammer':>8}{'resale':>8}{'grade':>6}"
           f"{'max bid':>8}{'≤max/wk':>8}{'profit':>8}{'€/wk':>7}{'steel':>7}")
     for i, (_, r) in enumerate(df.head(a.top).iterrows(), 1):
