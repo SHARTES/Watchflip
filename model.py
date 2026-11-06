@@ -4,6 +4,7 @@
     python model.py baseline  # the numbers a model has to beat
     python model.py train     # fit, and compare old features against new
     python model.py calibrate # make the p20/p80 band honest, per regime
+    python model.py refresh   # re-download the cached training data in full
 
 Design notes, because they decide whether the result means anything:
 
@@ -38,9 +39,16 @@ features that carry value information directly:
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import os
+import pickle
 import re
 import sys
+import tempfile
 import warnings
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -108,7 +116,7 @@ select
     jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Band material").value') #>> '{}' as band_material,
     l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,reviewCount}' as seller_reviews,
     l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,ratingValue}' as seller_rating,
-    r.final_price, r.bid_count,
+    r.final_price, r.bid_count, r.recorded_at,
     (select count(*) from bid_snapshots s where s.lot_id = l.lot_id) as snapshots,
     (select s.current_bid from bid_snapshots s
      where s.lot_id = l.lot_id and s.minutes_to_close between 1200 and 1680
@@ -136,10 +144,79 @@ def with_photos(conn, query: str) -> str:
     return query.replace("l.photo_count,", "coalesce(l.photo_n, l.photo_count) as photo_count,")
 
 
-def load() -> pd.DataFrame:
+# Training-data cache. A result is written once and never changed (lot_results
+# is insert-only), so sold lots are kept on this machine and each call fetches
+# only the results recorded since the last one. Before this, every shortlist
+# pass (twice an hour) downloaded every sold lot with its full description
+# again, about 25-30 MB a time, and used up Supabase's monthly egress in days.
+CACHE = Path(__file__).with_name("data") / "closed_lots.pkl"
+CACHE_VERSION = 1
+FULL_REFRESH = timedelta(days=7)   # catches rare edits to old rows (photo backfill)
+OVERLAP = timedelta(minutes=15)    # re-read the last minutes so a slow commit is not missed
+log = logging.getLogger("model")
+
+
+def _read_cache(key: str) -> dict | None:
+    try:
+        with open(CACHE, "rb") as fh:
+            cache = pickle.load(fh)
+    except Exception:              # missing or unreadable: start over
+        return None
+    if cache.get("version") != CACHE_VERSION or cache.get("query") != key:
+        return None                # the query changed, so the cached columns may differ
+    return cache
+
+
+def _write_cache(cache: dict) -> None:
+    CACHE.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=CACHE.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            pickle.dump(cache, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, CACHE)     # atomic: a parallel run never reads half a file
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _sold_rows(fresh: bool = False) -> pd.DataFrame:
+    now = datetime.now(timezone.utc)
     with db.connect() as conn:
-        rows = conn.execute(with_photos(conn, QUERY)).fetchall()
-    df = pd.DataFrame(rows)
+        query = with_photos(conn, QUERY)
+        key = hashlib.sha256(query.encode()).hexdigest()
+        cache = None if fresh else _read_cache(key)
+        if cache is None or now - cache["built"] > FULL_REFRESH:
+            rows = pd.DataFrame(conn.execute(query).fetchall())
+            built, new_rows, mode = now, len(rows), "full download"
+        else:
+            since = cache["since"] - OVERLAP
+            inc = query.replace("where r.sold and",
+                                "where r.recorded_at > %(since)s and r.sold and", 1)
+            assert inc != query, "QUERY changed: incremental filter not applied"
+            new = pd.DataFrame(conn.execute(inc, {"since": since}).fetchall())
+            if not new.empty:      # the overlap re-reads rows we have; results never change
+                new = new[~new["lot_id"].isin(set(cache["rows"].get("lot_id", [])))]
+            rows = cache["rows"] if new.empty else pd.concat([cache["rows"], new], ignore_index=True)
+            built, new_rows, mode = cache["built"], len(new), "cached"
+    if rows.empty:
+        return rows
+    rows = (rows.drop_duplicates("lot_id", keep="last")
+                .sort_values("close_time", kind="stable")
+                .reset_index(drop=True))
+    log.info("training data: %s, %d new, %d sold lots", mode, new_rows, len(rows))
+    if mode == "full download" or new_rows:
+        since = pd.Timestamp(rows["recorded_at"].max()).to_pydatetime()
+        _write_cache({"version": CACHE_VERSION, "query": key, "built": built,
+                      "since": since, "rows": rows})
+    return rows
+
+
+def load(fresh: bool = False) -> pd.DataFrame:
+    """Sold lots with prices, for training. Cached locally, see _sold_rows."""
+    df = _sold_rows(fresh).drop(columns=["recorded_at"], errors="ignore")
     if df.empty:
         raise SystemExit("no sold lots with prices — nothing to model")
     df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
@@ -627,5 +704,6 @@ def calibrate() -> None:
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "audit"
     {"audit": audit, "baseline": baseline, "train": train,
-     "calibrate": calibrate}.get(
+     "calibrate": calibrate,
+     "refresh": lambda: print(f"{len(load(fresh=True)):,} sold lots cached in {CACHE}")}.get(
         cmd, lambda: sys.exit(__doc__))()
