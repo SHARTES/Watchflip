@@ -72,6 +72,16 @@ class Config:
         "166.0216", "166.0202", "166.010", "166.0213",     # Seamaster automatics
         "135.011", "135.041",                              # Genève hand-wound
         "511.0458",                                        # the small Omega "tank"
+        # Added 16 Nov, from 9 weeks of sold lots (12 Sep – 15 Nov): references
+        # with 3+ lots a month, a typical hammer of €500–850, and lots that did
+        # close cheap enough to resell at 20%+.
+        "166.0163", "166.0169", "166.0168", "166.070", "166.099",   # Genève automatics
+        "166.002", "166.003", "166.067", "166.026",                 # Seamaster automatics
+        "136.011", "135.003",                                       # hand-wound (136.011: first sale, +24%)
+        "396.1070", "396.1201", "396.1080",                         # Constellation quartz, steel
+        # Pre-Bond Seamaster 200m by reference: about one in five is titled only
+        # "Seamaster … Ref. 396.1062" and the name pattern below misses it.
+        "396.1041", "396.1042", "396.1051", "396.1052", "396.1061", "396.1062",
     )
     # Families matched by name rather than reference (regex, title and model).
     focus_patterns: tuple = (

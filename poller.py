@@ -96,6 +96,26 @@ def _snapshot(conn, lot_id, rec, close_time) -> None:
     )
 
 
+def fetch_one(url: str, wait: int = 25) -> str | None:
+    """Read and store one lot page on request (ask.py), the way discover does.
+
+    Returns the lot id, or None when the browser is busy or blocked, or the
+    page could not be read. Same browser, lock and delays as every other job."""
+    try:
+        with fetcher(lock_timeout=wait) as f, db.connect() as conn:
+            html = f.get_html(url)
+            rec = parse_lot_page(html, url) if html else None
+            if rec is None:
+                return None
+            db.upsert_lot(conn, {k: v for k, v in rec.items() if not k.startswith("_")})
+            _snapshot(conn, rec["lot_id"], rec, rec.get("close_time"))
+            conn.commit()
+            return rec["lot_id"]
+    except Exception:
+        log.exception("could not fetch %s on request", url)
+        return None
+
+
 def discover_lot_urls(f) -> list[str]:
     """Collect lot URLs from every configured catalogue source.
 

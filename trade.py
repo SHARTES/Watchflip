@@ -4,6 +4,7 @@
     python trade.py cost 106921180 --amount 180 --note "service, Uhrmacher X"
     python trade.py list 106921180 --price 790
     python trade.py sell 106921180 --price 720 --shipping 15 --fees 0
+    python trade.py capital --amount 1500 --note "start"     (money you put into the business)
     python trade.py show
 
 Every assumption in the shortlist — that you sell at 95% of the cheaper-quarter
@@ -15,6 +16,13 @@ to sale, and `show` compares what happened with what the system expected:
                      (the shortlist assumes REALISM_EBAY, see shortlist.py)
   days to sell       from purchase to sale (the capital check assumes 28)
   profit             sale − shipping − fees − purchase − every extra cost
+  free cash          capital paid in − purchases − extra costs + what sales
+                     brought in (payouts still on their way count as cash).
+                     Alerts and "ask the bot" check each lot against half of it.
+
+`list` keeps the first listing date and price, so the price reminders in
+stock.py count from the day a watch first went on sale, not from the last
+price change.
 
 Nothing here touches the auction data; it is your own ledger.
 """
@@ -54,6 +62,18 @@ create table if not exists trade_costs (
 );
 alter table trades enable row level security;
 alter table trade_costs enable row level security;
+alter table trades add column if not exists first_listed_on date;
+alter table trades add column if not exists first_listed_price numeric(12, 2);
+update trades set first_listed_on = listed_on where first_listed_on is null and listed_on is not null;
+update trades set first_listed_price = listed_price
+ where first_listed_price is null and listed_price is not null;
+create table if not exists capital (
+    id       bigserial primary key,
+    paid_on  date not null default current_date,
+    amount   numeric(12, 2) not null,          -- negative when you take money out
+    note     text
+);
+alter table capital enable row level security;
 """
 
 
@@ -110,10 +130,57 @@ def list_(a) -> None:
     lot = _lot_id(a.lot)
     with db.connect() as conn:
         _setup(conn)
-        conn.execute("update trades set listed_price = %s, listed_on = %s, channel = coalesce(%s, channel) "
-                     "where lot_id = %s", (a.price, a.on or date.today(), a.channel, lot))
+        day = a.on or date.today()
+        n = conn.execute("update trades set listed_price = %s, listed_on = %s, "
+                         "first_listed_on = coalesce(first_listed_on, %s), "
+                         "first_listed_price = coalesce(first_listed_price, %s), "
+                         "channel = coalesce(%s, channel) where lot_id = %s",
+                         (a.price, day, day, a.price, a.channel, lot)).rowcount
         conn.commit()
+    if not n:
+        print(f"{lot} is not in the ledger — record the purchase first (trade.py buy)")
+        return
     print(f"{lot} listed at €{a.price:.0f}")
+
+
+def capital(a) -> None:
+    with db.connect() as conn:
+        _setup(conn)
+        conn.execute("insert into capital (paid_on, amount, note) values (%s, %s, %s)",
+                     (a.on or date.today(), a.amount, a.note))
+        conn.commit()
+        c = cash(conn)
+    print(f"recorded €{a.amount:,.2f} of capital" + (f" ({a.note})" if a.note else "")
+          + f" — capital in €{c['capital']:,.2f}, free cash €{c['cash']:,.2f}")
+
+
+def cash(conn) -> dict | None:
+    """Free cash by the ledger, or None until capital has been recorded.
+
+    {capital, cash, held}: capital paid in; cash = capital − every purchase and
+    extra cost + what sales brought in after shipping and fees; held = cost of
+    the watches not sold yet. A payout still on its way counts as cash."""
+    t = conn.execute("select to_regclass('capital') as c, to_regclass('trades') as t").fetchone()
+    if t["c"] is None:
+        return None
+    cap = conn.execute("select coalesce(sum(amount), 0) as total, count(*) as n from capital").fetchone()
+    if not cap["n"]:
+        return None
+    out = {"capital": float(cap["total"]), "cash": float(cap["total"]), "held": 0.0}
+    if t["t"] is None:
+        return out
+    r = conn.execute("""
+        select coalesce(sum(t.paid_total), 0) as paid,
+               coalesce(sum(x.extra), 0) as extra,
+               coalesce(sum(t.sold_price - coalesce(t.ship_out, 0) - coalesce(t.sale_fees, 0))
+                        filter (where t.sold_price is not null), 0) as sales,
+               coalesce(sum(t.paid_total + x.extra) filter (where t.sold_price is null), 0) as held
+        from trades t
+        cross join lateral (select coalesce(sum(c.amount), 0) as extra
+                            from trade_costs c where c.lot_id = t.lot_id) x""").fetchone()
+    out["cash"] = out["capital"] - float(r["paid"]) - float(r["extra"]) + float(r["sales"])
+    out["held"] = float(r["held"])
+    return out
 
 
 def sell(a) -> None:
@@ -137,6 +204,7 @@ def show(a) -> None:
                                   where c.lot_id = t.lot_id), 0) as extra
             from trades t order by t.bought_on, t.lot_id
         """).fetchall()
+        money = cash(conn)
     if not rows:
         print("No trades yet.")
         return
@@ -183,6 +251,13 @@ def show(a) -> None:
             print(f"      median realised ÷ value {ratios[len(ratios) // 2]:.2f}{note}")
         if n < 5:
             print("      Fewer than 5 sales — read these as anecdotes, not rates.")
+    if money:
+        print(f"cash: €{money['cash']:,.0f} free of €{money['capital']:,.0f} paid in "
+              f"(payouts on the way included) · half-cash rule: next watch up to "
+              f"€{max(money['cash'], 0) / 2:,.0f} all-in")
+    else:
+        print("cash: not tracked yet — record what you put in:  "
+              "python trade.py capital --amount 1650 --note start")
 
 
 def main() -> None:
@@ -211,6 +286,10 @@ def main() -> None:
     s.add_argument("--shipping", type=float, default=0.0)
     s.add_argument("--fees", type=float, default=0.0)
     s.add_argument("--channel"); s.add_argument("--on", **on); s.set_defaults(fn=sell)
+
+    k = sub.add_parser("capital", help="money you put into (or, negative, took out of) the business")
+    k.add_argument("--amount", type=float, required=True)
+    k.add_argument("--note"); k.add_argument("--on", **on); k.set_defaults(fn=capital)
 
     sub.add_parser("show").set_defaults(fn=show)
     a = p.parse_args()

@@ -4,6 +4,8 @@
     python run.py sweep     # one sweeping pass
     python run.py health    # how much data do I actually have
     python run.py serve     # long-running scheduler
+    python run.py reserve   # unsold follow-ups and relist notices, one pass
+    python run.py stock     # price reminders for unsold stock, one pass
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import comps
 import db
 import poller
 import replies
+import reserve
+import stock
 import sweeper
 import shortlist
 
@@ -56,9 +60,18 @@ def serve() -> None:
                  id="shortlist", max_instances=1, misfire_grace_time=600)
     sched.add_job(shortlist.remind, "cron", minute="*/5", id="remind",
                    max_instances=1, misfire_grace_time=120)
-    # Prices you reply to an alert in Telegram (replies.py). Telegram only, no browser.
-    sched.add_job(replies.poll, "cron", minute="*/2", id="replies",
+    # What you send the bot in Telegram (replies.py): prices replied to an alert,
+    # and "ask the bot" — a lot link or number, answered with its max bid (ask.py).
+    # Every minute, so an answer comes while an auction is still running.
+    sched.add_job(replies.poll, "cron", minute="*", id="replies",
                   max_instances=1, misfire_grace_time=50)
+    # After the close: lots you had a max for that ended unsold under it, and
+    # the same listings coming back (reserve.py). Database and Telegram only.
+    sched.add_job(reserve.run, "cron", minute="25,55", id="reserve",
+                  max_instances=1, misfire_grace_time=600)
+    # Unsold stock that has been for sale 14, 28 or 45 days (stock.py).
+    sched.add_job(stock.run, "cron", hour="10", minute="0", id="stock",
+                  max_instances=1, misfire_grace_time=6 * 3600)
     log.info("scheduler: monitor every 15 min; discover every 2 h and sweep twice an "
              "hour, both paused 17:00–23:00 for the evening closes")
     sched.start()
@@ -72,6 +85,8 @@ COMMANDS = {
     "serve": serve,
     "comps": comps.run,
     "replies": replies.poll,
+    "reserve": reserve.run,
+    "stock": stock.run,
 }
 
 if __name__ == "__main__":

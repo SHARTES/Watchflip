@@ -16,8 +16,13 @@ reference. Prices go into market_comps exactly as `python market.py add` would
 put them; the material is the lot's own unless you say otherwise. Only
 messages from your own chat (TELEGRAM_CHAT_ID) are read.
 
+Ask about any lot (ask.py): send its Catawiki link or its lot number as a
+message of its own, or reply  ask  to any message about a lot, and the bot
+answers with the max bid, the all-in cost, past sales and what to check.
+
 Runs every minute from run.py serve:  python run.py replies  does one pass.
-Nothing here reads any website: it only talks to Telegram's bot API.
+Logging prices only talks to Telegram's bot API. Asking about a lot may open
+that one lot page, through the same polite browser session as the monitor.
 """
 
 from __future__ import annotations
@@ -61,7 +66,25 @@ MIN_PRICE, MAX_PRICE = 20, 50_000
 HELP = ("Reply to an alert with what you saw, for example:\n"
         "sold 540 575 · c24 450 520 · wh 480 · ebay 499\n"
         "Add plated / steel / gold or serviced if it differs. Reply undo to my confirmation "
-        "to remove it.")
+        "to remove it.\n\n"
+        "Ask about any lot: send me its Catawiki link or lot number, or reply ask to one of "
+        "my messages.")
+
+# "Ask the bot": a Catawiki lot link anywhere in the message, or a message that
+# is only a lot number (8–10 digits; prices are far shorter), optionally after
+# ask / lot / check / max.
+LOT_LINK_RE = re.compile(r"(https?://\S*catawiki\.\S*?/l/(\d{6,12})[^\s]*)", re.I)
+LOT_ID_RE = re.compile(r"/?(?:(?:ask|lot|check|max)\s+)?#?(\d{8,10})", re.I)
+ASK_WORDS = {"ask", "/ask", "?", "max", "check"}
+
+
+def asked_lot(text: str) -> tuple[str, str | None] | None:
+    """(lot id, link or None) when the message asks about a lot, else None."""
+    m = LOT_LINK_RE.search(text)
+    if m:
+        return m.group(2), m.group(1)
+    m = LOT_ID_RE.fullmatch(text.strip())
+    return (m.group(1), None) if m else None
 
 
 def _setup(conn) -> None:
@@ -139,6 +162,33 @@ def _lot(lot_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def send_html(text: str, lot_id: str | None = None, reply_to: int | None = None) -> int | None:
+    """Send an HTML message to your chat and remember which lot it is about, so
+    a reply to it can be matched. Returns the message id, or None if not sent."""
+    import requests
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        log.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — nothing sent")
+        return None
+    data = {"chat_id": chat, "text": text, "parse_mode": "HTML",
+            "disable_web_page_preview": "true"}
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=20)
+    except requests.RequestException:
+        log.exception("telegram send failed")
+        return None
+    if not r.ok:
+        log.warning("telegram refused a message: %s", r.text[:200])
+        return None
+    mid = r.json().get("result", {}).get("message_id")
+    if mid and lot_id:
+        remember(mid, str(lot_id))
+    return mid
+
+
 def _send(token: str, chat: str, text: str, reply_to: int | None = None):
     import requests
     data = {"chat_id": chat, "text": text, "disable_web_page_preview": "true"}
@@ -162,6 +212,18 @@ def handle(msg: dict, token: str, chat: str) -> None:
         _setup(conn)
         known = conn.execute("select lot_id, entries from tg_messages where message_id = %s",
                              (replied,)).fetchall() if replied else []
+    ask_for = asked_lot(text)
+    if ask_for is None and text.lower() in ASK_WORDS:
+        if known and known[0]["lot_id"]:
+            ask_for = (known[0]["lot_id"], None)
+        else:
+            _send(token, chat, "Reply ask to one of my messages about a lot, or send me a "
+                  "Catawiki link or lot number.", mid)
+            return
+    if ask_for is not None:
+        import ask
+        ask.reply(ask_for[0], url=ask_for[1], reply_to=mid)
+        return
     if replied and text.lower() == "undo":
         entries = known[0]["entries"] if known else None
         if not entries:

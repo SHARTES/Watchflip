@@ -33,6 +33,8 @@ import math
 import os
 import re
 import sys
+import threading
+import time
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -225,6 +227,53 @@ TOP_N = 8
 ALERT_HOURS = 3.0
 REMIND_MINUTES = 30
 
+# ---------------------------------------------------------- fair max (16 Nov)
+# The max bid above is the SAFE max: 25% margin (moved by uncertainty) on a
+# sale planned half through Chrono24, after a 5% reserve. Your own rule is
+# simpler — 20% on what the watch costs you — and your first Omega sales went
+# through at 97–98% of the value, two of three with no platform fee. So next to
+# the safe max there is a FAIR max: the hammer that still leaves FAIR_MARGIN
+# when the watch sells at the quick-sale price on FAIR_CHANNEL, with no reserve
+# taken off. It is offered only where a surprise is least likely: an EU seller
+# (no import VAT, no customs delay) and a value backed by FAIR_MIN_SALES or
+# more comparable Catawiki sales of the same reference. A lot past the safe
+# max but under the fair max is alerted too, marked as a fair deal.
+FAIR_MAX = True
+FAIR_MARGIN = 0.20
+FAIR_CHANNEL = "in person"
+FAIR_MIN_SALES = 5
+
+# ------------------------------------------------- what a listing leaves out
+# Read from the description for the alert's "Before you bid" list. They never
+# change a number; they tell you what to ask the seller or look for.
+RUNS_RE = re.compile(
+    r"\b(runs|running|ticking|operational|operating"
+    r"|keep(?:s|ing)? (?:good |accurate |perfect |excellent |great )?time"
+    r"|(?:in |good |perfect |full |fully |proper |excellent )working (?:order|condition)"
+    r"|working (?:order|condition|properly|perfectly|well|fine)"
+    r"|(?:is|are|currently|still|and|,) working(?! days?)"
+    r"|(?:fully |perfectly )?function(?:al|ing|s)"
+    r"|works (?:well|perfectly|fine|properly|correctly|great|flawlessly|as (?:it )?should)"
+    r"|(?:watch|movement|it|mechanism) (?:is )?work(?:s|ing)"
+    r"|l[äa]uft|funktioniert|funktionsf[äa]hig|funktionst[üu]chtig|funzionante|funziona"
+    r"|fonctionne|fonctionnel|en (?:parfait )?[ée]tat de marche|loopt|werkt|funciona)\b", re.I)
+# Deliberately narrow: dealers' boilerplate says "defective or damaged areas",
+# "in the unlikely event of a defective watch", "if your watch does not run,
+# shake it" — none of which is a fault in this watch.
+STOPPED_RE = re.compile(
+    r"\b(?:is|it(?:'s| is)?|watch|movement|currently) not (?:running|working)|^not (?:running|working)"
+    r"|(?<!if it )(?<!if your watch )does ?n[o'’]t work\b|non funziona|ne fonctionne pas"
+    r"|l[äa]uft nicht|funktioniert nicht|for parts|needs? (?:a )?(?:new )?battery"
+    r"|battery (?:is )?(?:dead|empty|flat)|needs? (?:a |to be )?(?:service|serviced|repair|repaired)\b"
+    r"|\bdefekt\b", re.I | re.M)
+AS_IS_RE = re.compile(
+    r"\bas[\s-]is\b|no returns?\b|cannot accept returns|returns? (?:are |is )?not accepted"
+    r"|no warranty|not (?:been )?tested|untested|ungepr[üu]ft|non test", re.I)
+WRIST_RE = re.compile(
+    r"(?:fits|wrist|arm circumference|handgelenk|polso|poignet|length including watch head)"
+    r"[^.\n]{0,40}?(\d{2}(?:[.,]\d)?)\s*cm", re.I)
+SHORT_WRIST_CM = 17.5     # at or under this, many men need extra links
+
 # Seller encoding: how a Catawiki seller's lots price relative to what they
 # are (model.add_seller_encoding). Off until analyze.py shows it lowers the
 # error on your data — part B compares the model with and without it.
@@ -251,6 +300,11 @@ EU = {
 }
 
 Z80 = 0.8416              # standard-normal quantile of the 80th percentile
+
+# score() and ask.py both set the module-level calibration (ASK_TO_HAMMER,
+# FEAT_BIAS, SIGMA_REF, SOLD_BY_REF). The scheduler runs jobs in threads, so
+# whoever values lots holds this lock while it does.
+PIPELINE_LOCK = threading.RLock()
 
 
 # ---------------------------------------------------------------- helpers
@@ -710,6 +764,45 @@ def max_bid(value: float, realism: float, non_eu: bool,
     return min(by_margin, by_budget), net_sale
 
 
+def fair_bid(v, value: float, realism: float, country: str) -> tuple[float, float] | None:
+    """(fair max bid, net from the sale) — or None when the lot does not qualify.
+
+    See FAIR_MAX: 20% on the landed cost when the watch sells at the quick-sale
+    price with no platform fee, for EU sellers and well-evidenced references."""
+    if (not FAIR_MAX or country != "eu" or v[3] not in ("ebay", "catawiki")
+            or (getattr(v, "m_sales", 0) or 0) < FAIR_MIN_SALES):
+        return None
+    net = keep(value * realism, FAIR_CHANNEL)
+    bid = min(hammer_for(net / (1 + FAIR_MARGIN), False),
+              hammer_for(cfg.max_all_in_cost, False))
+    return bid, net
+
+
+def risk_flags(lot) -> list[str]:
+    """What the listing says, or fails to say, that should change how you bid."""
+    text = f"{lot.get('title') or ''}\n{lot.get('description') or ''}"
+    out = []
+    quartz = "quartz" in str(lot.get("movement") or "").lower()
+    if STOPPED_RE.search(text):
+        out.append("The listing mentions a fault, a dead battery or a needed service — "
+                   "read the description before anything else")
+    elif quartz and not RUNS_RE.search(text):
+        out.append("Quartz, and the listing does not say it runs — ask the seller, or bid "
+                   "as if it needs a new movement (about a quarter less)")
+    if AS_IS_RE.search(text):
+        out.append("Sold as-is / no returns — what arrives is yours")
+    band = str(lot.get("band_material") or "").lower()
+    if re.search(r"steel|gold|metal|titan", band):
+        sizes = [float(x.replace(",", ".")) for x in WRIST_RE.findall(text)]
+        short = str(lot.get("band_length") or "").lower().startswith("short")
+        if sizes and min(sizes) <= SHORT_WRIST_CM:
+            out.append(f"Bracelet fits only up to {min(sizes):g} cm — many men need 18–19; "
+                       "extra Omega links cost €50–100 each")
+        elif short and not sizes:
+            out.append("Bracelet is listed as short — ask how many links come with it")
+    return out
+
+
 def p_under(x: float, p20: float, p50: float, p80: float) -> float:
     """Chance the lot closes at or below x, from the calibrated band.
 
@@ -738,8 +831,12 @@ select
     jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original papers included").value') #>> '{}' as papers_spec,
     jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Original warranty included").value') #>> '{}' as warranty_spec,
     jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Band material").value') #>> '{}' as band_material,
+    jsonb_path_query_first(l.raw, '$.lotDetailsData.specifications[*] ? (@.name == "Band length").value') #>> '{}' as band_length,
     l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,reviewCount}' as seller_reviews,
     l.raw #>> '{lotDetailsData,seo,ldSchema,aggregateRating,ratingValue}' as seller_rating,
+    (select s.reserve_met from bid_snapshots s
+     where s.lot_id = l.lot_id and s.reserve_met is not null
+     order by s.observed_at desc limit 1) as reserve_met,
     (select s.bid_count from bid_snapshots s where s.lot_id = l.lot_id
      order by s.observed_at desc limit 1) as bid_count,
     (select count(*) from bid_snapshots s where s.lot_id = l.lot_id) as snapshots,
@@ -778,20 +875,32 @@ def load_open() -> pd.DataFrame:
     return df
 
 
-def load_asks(ref_to_line: dict) -> tuple[dict, dict]:
+_ASKS = {"at": None, "by_ref": None}
+
+
+def load_asks(ref_to_line: dict, max_age: float = 0.0) -> tuple[dict, dict]:
     """Live eBay listings per normalised reference, and a value per line.
 
     by_ref is {ref_key: listings}; the value for a particular lot is computed
     in ebay_value(), because which listings count depends on the lot (a steel
     watch is not priced from solid-gold listings).
+
+    max_age (seconds): reuse the listings read less than this long ago instead
+    of downloading them again. The shortlist always reads fresh (0); ask.py
+    reuses what the last shortlist pass read, so a question costs no download.
     """
-    by_ref = asks.load()
-    SOLD_BY_REF.clear()
-    try:
-        import market
-        SOLD_BY_REF.update(market.sold_by_ref())
-    except Exception:
-        log.exception("logged sale prices could not be read — continuing without them")
+    now = time.monotonic()
+    if max_age and _ASKS["by_ref"] is not None and now - _ASKS["at"] < max_age:
+        by_ref = _ASKS["by_ref"]
+    else:
+        by_ref = asks.load()
+        SOLD_BY_REF.clear()
+        try:
+            import market
+            SOLD_BY_REF.update(market.sold_by_ref())
+        except Exception:
+            log.exception("logged sale prices could not be read — continuing without them")
+        _ASKS.update(at=now, by_ref=by_ref)
     rows = []
     for k, g in by_ref.items():
         v = asks.value(g, "steel")
@@ -867,7 +976,7 @@ def build_live_model(closed: pd.DataFrame, open_: pd.DataFrame):
 
 def score() -> tuple[pd.DataFrame, dict]:
     stats = {"window": 0, "target": 0, "filtered": 0, "no_value": 0, "weak": 0,
-             "past_ceiling": 0, "unlikely": 0, "kept": 0}
+             "past_ceiling": 0, "unlikely": 0, "kept": 0, "fair": 0}
 
     open_ = load_open()
     if open_.empty:
@@ -918,18 +1027,29 @@ def score() -> tuple[pd.DataFrame, dict]:
         country = eu_status(lot["seller_country"])
         non_eu = country == "non_eu"
         margin = margin_for(kind, getattr(v, "sigma", None))
-        ceiling, net_sale = max_bid(value, realism, non_eu, margin)
+        safe_max, net_sale = max_bid(value, realism, non_eu, margin)
+        fair_at = fair_bid(v, value, realism, country)
 
         current = float(lot["current_bid"]) if pd.notna(lot["current_bid"]) else 0.0
-        if ceiling <= current:
-            stats["past_ceiling"] += 1
-            continue
-
         p20, p50, p80 = (float(pred.loc[idx, c]) for c in ("p20", "p50", "p80"))
-        p_win = p_under(ceiling, p20, p50, p80)
-        if p_win < MIN_WIN_PROB:
-            stats["unlikely"] += 1
-            continue
+        # The bid to act on: the safe max while it can still win, otherwise the
+        # fair max where the lot qualifies for one (see FAIR_MAX).
+        tier, ceiling = "safe", safe_max
+        p_win = p_under(safe_max, p20, p50, p80) if safe_max > current else 0.0
+        if safe_max <= current or p_win < MIN_WIN_PROB:
+            passed = safe_max <= current
+            if fair_at is None or fair_at[0] <= max(safe_max, current):
+                stats["past_ceiling" if passed else "unlikely"] += 1
+                continue
+            p_win = p_under(fair_at[0], p20, p50, p80)
+            if p_win < MIN_WIN_PROB:
+                stats["unlikely"] += 1
+                continue
+            tier, ceiling, net_sale, margin = "fair", fair_at[0], fair_at[1], FAIR_MARGIN
+            stats["fair"] = stats.get("fair", 0) + 1
+        # Shown next to a safe max when it leaves room above it.
+        fair_max = (fair_at[0] if (tier == "safe" and fair_at is not None and fair_at[0] > safe_max)
+                    else None)
 
         win_price = max(min(p50, ceiling), current)
         profit = net_sale - landed(win_price, non_eu)
@@ -981,6 +1101,9 @@ def score() -> tuple[pd.DataFrame, dict]:
             "serviced": asks.lot_serviced(lot),
             "grade": v.grade, "beat": v.beat, "competitors": v.competitors or [],
             "uncapped": v.uncapped,
+            "tier": tier, "safe_max": safe_max, "fair_max": fair_max,
+            "reserve_met": lot.get("reserve_met"),
+            "risks": risk_flags(lot),
         })
 
     out = pd.DataFrame(rows)
@@ -1001,6 +1124,8 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
           f"evidence below grade {MIN_ALERT_GRADE}: {stats.get('weak', 0)}   "
           f"already past your ceiling: {stats['past_ceiling']}   "
           f"under {MIN_WIN_PROB:.0%} chance: {stats['unlikely']}")
+    if FAIR_MAX:
+        print(f"kept as a fair deal (past the safe max, under the fair max): {stats.get('fair', 0)}")
     if adj:
         parts = [f"{r} n={counts.get(r, 0)}" for r in adj]
         print(f"calibrated on the last {CAL_DAYS} days ({', '.join(parts)})")
@@ -1016,7 +1141,11 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
         return
     print(f"'if won' = profit if you win at your max bid (the worst case), selling on "
           f"{plan_name()} at the quick-sale price, after the {WARRANTY_RESERVE:.0%} reserve;")
-    print("'exp. €' = that profit × the chance of winning, used for ranking.\n")
+    print("'exp. €' = that profit × the chance of winning, used for ranking.")
+    if FAIR_MAX:
+        print(f"'fair' rows: past the safe max; the max bid shown is the fair max — "
+              f"{FAIR_MARGIN:.0%} when sold {FAIR_CHANNEL} with no fee and no reserve.")
+    print()
 
     print(f"{'closes':>7}  {'line':<15}{'ref':<14}{'now':>6}{'likely':>8}"
           f"{'max bid':>9}{'chance':>8}{'if won':>8}{'exp. €':>8}")
@@ -1025,6 +1154,10 @@ def print_table(out: pd.DataFrame, stats: dict) -> None:
               f"{r['current']:>6.0f}{r['p50']:>8.0f}{r['max_bid']:>9.0f}"
               f"{r['p_win']:>7.0%}{r['profit_at_max']:>8.0f}{r['exp_profit']:>8.0f}")
         extra = f"band €{r['p20']:.0f}–{r['p80']:.0f} · value from {r['basis']}"
+        if r.get("tier") == "fair":
+            extra = f"FAIR deal (safe max €{r['safe_max']:.0f}) · " + extra
+        elif pd.notna(r.get("fair_max")):
+            extra = f"fair max €{r['fair_max']:.0f} · " + extra
         if r["flags"]:
             extra += f" · {r['flags']}"
         print(f"{'':>9}{extra}")
@@ -1046,6 +1179,10 @@ def channel_profits(price: float, landed_cost: float) -> list[tuple[str, float]]
 def breakdown(r) -> str:
     """One line showing where the planning number comes from."""
     sale = r["value"] * r["realism"]
+    if r.get("tier") == "fair":
+        return (f"value €{r['value']:.0f} × {r['realism']:.0%} = quick sale €{sale:.0f} → "
+                f"net €{r['net_sale']:.0f} sold {FAIR_CHANNEL}, no fee, no reserve · "
+                f"fair max €{r['max_bid']:.0f} keeps {r['margin']:.0%} margin")
     return (f"value €{r['value']:.0f} × {r['realism']:.0%} = quick sale €{sale:.0f} → "
             f"net €{r['net_sale']:.0f} on {plan_name()} after fee, shipping + "
             f"{WARRANTY_RESERVE:.0%} reserve · max bid €{r['max_bid']:.0f} keeps {r['margin']:.0%} margin"
@@ -1085,6 +1222,51 @@ def _closes(r) -> str:
     return f"Closes {day} at {local:%H:%M} · in {left}"
 
 
+def reserve_unmet(flag) -> bool:
+    """True only when the page said the reserve is NOT met (not when unknown)."""
+    try:
+        return flag is not None and not pd.isna(flag) and not bool(flag)
+    except (TypeError, ValueError):
+        return False
+
+
+def memory_text(mem) -> str | None:
+    """One line on earlier runs of the same listing (reserve.memory), or None."""
+    if not isinstance(mem, (list, tuple)) or not mem:
+        return None
+    parts = []
+    for m in mem:
+        day = pd.Timestamp(m["close_time"]).tz_convert(cfg.timezone).strftime("%-d %b")
+        if m["sold"] and m["final_price"] is not None:
+            parts.append(f"{day} sold for {_eur(float(m['final_price']))}")
+        elif m["last_bid"] is not None:
+            parts.append(f"{day} unsold, last bid {_eur(float(m['last_bid']))}")
+        else:
+            parts.append(f"{day} ended without a sale")
+    first = mem[0]
+    if first["sold"]:
+        why = ("Either it is back (unpaid or being resold), or the seller uses one text "
+               "for several watches")
+    elif first["last_bid"] is not None:
+        why = "The reserve was above that bid then"
+    else:
+        why = None
+    return ("🔁 Same seller ran this exact listing before: " + " · ".join(parts)
+            + (f". {why}" if why else ""))
+
+
+def cash_text(cash, all_in: float) -> str | None:
+    """The half-of-free-cash rule against this lot's all-in cost (trade.cash)."""
+    if not isinstance(cash, dict) or cash.get("cash") is None:
+        return None
+    free, half = cash["cash"], cash["cash"] / 2
+    if all_in <= half:
+        return (f"Cash rule OK: {_eur(all_in)} all-in is within half of your free cash "
+                f"({_eur(free)}, payouts on the way included)")
+    return (f"⚠️ Cash rule: {_eur(all_in)} all-in is more than half of your free cash "
+            f"({_eur(free)}, payouts on the way included) — the rule allows {_eur(max(half, 0))}")
+
+
 def message(r) -> str:
     """The Telegram alert, in HTML (bold headings, tappable links)."""
     from html import escape
@@ -1096,13 +1278,26 @@ def message(r) -> str:
     margin = r["profit_at_max"] / r["landed_at_max"] if r["landed_at_max"] else 0
     non_eu = r["country"] == "non_eu"
 
-    out = [f"⌚ <b>{escape(name)}</b>"]
+    fair_tier = r.get("tier") == "fair"
+    out = [f"⚖️ <b>{escape(name)}</b> · fair deal" if fair_tier else f"⌚ <b>{escape(name)}</b>"]
     if details:
         out.append(escape(details))
     out.append(_closes(r))
+    mem = memory_text(r.get("memory"))
+    if mem:
+        out.append(escape(mem))
     out.append("")
 
-    out.append(f"<b>Bid up to {_eur(r['max_bid'])}</b> — and not a euro more")
+    if fair_tier:
+        out.append(f"<b>Bid up to {_eur(r['max_bid'])}</b> — the fair max, and not a euro more")
+        gone = "is already passed" if r["current"] >= r["safe_max"] else "is unlikely to win"
+        out.append(f"The safe max of {_eur(r['safe_max'])} {gone}. This one pays only if you "
+                   f"sell it yourself with no platform fee")
+    else:
+        out.append(f"<b>Bid up to {_eur(r['max_bid'])}</b> — and not a euro more")
+        if pd.notna(r.get("fair_max")):
+            out.append(f"Fair max {_eur(r['fair_max'])}: up to there it still makes "
+                       f"{FAIR_MARGIN:.0%} if you sell it yourself with no platform fee")
     now = "no bids yet" if r["current"] <= 0 else f"bid {_eur(r['current'])}"
     seen = r.get("seen_at")
     if seen is not None and pd.notna(seen):
@@ -1115,6 +1310,9 @@ def message(r) -> str:
     out.append(f"{now.capitalize()} · likely to close near {_eur(r['p50'])} "
                f"(usually {_eur(r['p20'])}–{_eur(r['p80'])})")
     out.append(f"Chance it closes at or under your max: <b>{r['p_win']:.0%}</b>")
+    if reserve_unmet(r.get("reserve_met")):
+        out.append("Reserve not met yet. Bid your max anyway: if it ends unsold with you as "
+                   "top bidder, the seller can offer it to you — accept only up to your max")
     out.append("")
 
     out.append(f"<b>If you win at {_eur(r['max_bid'])}</b>")
@@ -1128,8 +1326,16 @@ def message(r) -> str:
         out.append(f"Quick-sale price about {_eur(sale)}")
     profits = " · ".join(f"{c} {_eur(p)}" for c, p in channel_profits(sale, r["landed_at_max"]))
     out.append(f"Profit if it sells for {_eur(sale)}: <b>{profits}</b>")
-    out.append(f"The max bid still keeps {margin:.0%} selling on {plan_name()}, "
-               f"after a {WARRANTY_RESERVE:.0%} reserve for repairs and returns")
+    if fair_tier:
+        out.append(f"The fair max keeps {margin:.0%} if it sells at the quick-sale price with "
+                   f"no platform fee (pickup, Willhaben PayLivery, Instagram). No reserve for "
+                   f"repairs is taken off")
+    else:
+        out.append(f"The max bid still keeps {margin:.0%} selling on {plan_name()}, "
+                   f"after a {WARRANTY_RESERVE:.0%} reserve for repairs and returns")
+    cash = cash_text(r.get("cash"), r["landed_at_max"])
+    if cash:
+        out.append(cash)
     if r["p50"] < r["max_bid"] * 0.95:
         saved = r["landed_at_max"] - landed(r["p50"], non_eu)
         out.append(f"If it closes near the likely {_eur(r['p50'])}: {_eur(saved)} more on each")
@@ -1147,7 +1353,7 @@ def message(r) -> str:
     else:
         out.append("No comparable watch for sale found — check the links below first.")
 
-    warn = []
+    warn = list(r.get("risks") or []) if isinstance(r.get("risks"), (list, tuple)) else []
     if r.get("serviced"):
         warn.append("Listing mentions a service — ask the seller for the receipt or date")
     else:
@@ -1191,6 +1397,33 @@ def _remember(resp, lot_id) -> None:
         log.exception("could not remember the alert message for %s", lot_id)
 
 
+_ALERTS_READY = False
+
+
+def alerts_schema(conn) -> None:
+    """Create or upgrade shortlist_alerts. Runs once per process."""
+    global _ALERTS_READY
+    if _ALERTS_READY:
+        return
+    conn.execute("""
+        create table if not exists shortlist_alerts (
+            lot_id     text primary key references lots (lot_id) on delete cascade,
+            sent_at    timestamptz not null default now(),
+            max_bid    numeric(12, 2),
+            p_win      numeric(5, 3),
+            exp_profit numeric(12, 2)
+        )""")
+    conn.execute("alter table shortlist_alerts enable row level security")
+    # max_bid is the bid the alert told you to place: the safe max, or the fair
+    # max on a fair-deal alert (tier = 'fair'). fair_max is set only on a safe
+    # alert that also had a higher fair max.
+    for col in ("value numeric(12, 2)", "grade text", "reminded_at timestamptz",
+                "fair_max numeric(12, 2)", "tier text", "followed_up_at timestamptz"):
+        conn.execute(f"alter table shortlist_alerts add column if not exists {col}")
+    conn.commit()
+    _ALERTS_READY = True
+
+
 def send_new(out: pd.DataFrame) -> None:
     import requests
 
@@ -1203,23 +1436,19 @@ def send_new(out: pd.DataFrame) -> None:
         return
 
     with db.connect() as conn:
-        conn.execute("""
-            create table if not exists shortlist_alerts (
-                lot_id     text primary key references lots (lot_id) on delete cascade,
-                sent_at    timestamptz not null default now(),
-                max_bid    numeric(12, 2),
-                p_win      numeric(5, 3),
-                exp_profit numeric(12, 2)
-            )""")
-        conn.execute("alter table shortlist_alerts enable row level security")
-        conn.execute("alter table shortlist_alerts add column if not exists value numeric(12, 2)")
-        conn.execute("alter table shortlist_alerts add column if not exists grade text")
+        alerts_schema(conn)
         sent = {r["lot_id"] for r in
                 conn.execute("select lot_id from shortlist_alerts").fetchall()}
         conn.commit()
 
         fresh = out[~out["lot_id"].isin(sent) & (out["hours"] <= ALERT_HOURS)].head(TOP_N)
+        import reserve
+        import trade
+        cash = _extra(conn, lambda: trade.cash(conn)) if len(fresh) else None
         for _, r in fresh.iterrows():
+            r = r.to_dict()
+            r["cash"] = cash
+            r["memory"] = _extra(conn, lambda: reserve.memory(conn, r["lot_id"]))
             resp = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data={"chat_id": chat, "text": message(r), "parse_mode": "HTML",
@@ -1230,14 +1459,27 @@ def send_new(out: pd.DataFrame) -> None:
                 log.warning("telegram refused %s: %s", r["lot_id"], resp.text[:200])
                 continue
             _remember(resp, r["lot_id"])
+            fm = r.get("fair_max")
             conn.execute(
-                "insert into shortlist_alerts (lot_id, max_bid, p_win, exp_profit, value, grade) "
-                "values (%s, %s, %s, %s, %s, %s) on conflict (lot_id) do nothing",
+                "insert into shortlist_alerts (lot_id, max_bid, p_win, exp_profit, value, grade, "
+                "fair_max, tier) values (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "on conflict (lot_id) do nothing",
                 (r["lot_id"], round(r["max_bid"], 2), round(r["p_win"], 3),
-                 round(r["exp_profit"], 2), round(r["value"], 2), r.get("grade")),
+                 round(r["exp_profit"], 2), round(r["value"], 2), r.get("grade"),
+                 round(float(fm), 2) if pd.notna(fm) else None, r.get("tier") or "safe"),
             )
             conn.commit()
         log.info("sent %d new lots to Telegram", len(fresh))
+
+
+def _extra(conn, fn):
+    """An optional extra for an alert (cash, lot memory): never let it stop the alert."""
+    try:
+        return fn()
+    except Exception:
+        conn.rollback()
+        log.exception("an optional part of the alert failed — sending without it")
+        return None
 
 
 STALE_MINUTES = 20        # a stored bid older than this is not shown as "now"
@@ -1245,8 +1487,10 @@ LAST_CHANCE_MINUTES = 12  # if the live check keeps failing, send anyway after t
 REMIND_WAIT_SECONDS = 480 # how long the reminder waits for the browser
 
 
-def _fetch_live(due: list[dict]) -> dict:
-    """Open each lot page once, right now, and return {lot_id: (bid, seen, close)}.
+def _fetch_live(due: list[dict], wait: int | None = None) -> dict:
+    """Open each lot page once, right now, and return
+    {lot_id: (bid, seen, close, reserve_met)} — reserve_met is None when the
+    page does not say. `wait` is how long to wait for the browser (seconds).
 
     A lot whose page Catawiki has removed comes back as {lot_id: None}, and is
     recorded as closed unsold so nothing scores or reminds about it again.
@@ -1263,7 +1507,7 @@ def _fetch_live(due: list[dict]) -> dict:
     try:
         # A monitor pass in the evening holds the browser up to ~10 minutes;
         # waiting for it beats sending a bid that is minutes old.
-        with fetcher(lock_timeout=REMIND_WAIT_SECONDS) as f, db.connect() as conn:
+        with fetcher(lock_timeout=wait or REMIND_WAIT_SECONDS) as f, db.connect() as conn:
             for r in due:
                 if f.should_stop:
                     break
@@ -1283,8 +1527,10 @@ def _fetch_live(due: list[dict]) -> dict:
                     db.update_close_time(conn, r["lot_id"], rec["close_time"])
                 poller._snapshot(conn, r["lot_id"], rec, close)
                 conn.commit()
+                rm = rec.get("_reserve_met")
                 live[r["lot_id"]] = (float(rec["_current_bid"]),
-                                     pd.Timestamp.now(tz="UTC"), pd.Timestamp(close))
+                                     pd.Timestamp.now(tz="UTC"), pd.Timestamp(close),
+                                     bool(rm) if rm is not None else None)
     except Exception:
         log.exception("live bid check failed — will retry or fall back")
     return live
@@ -1308,12 +1554,13 @@ def remind() -> None:
         return
 
     with db.connect() as conn:
-        conn.execute("alter table shortlist_alerts add column if not exists "
-                     "reminded_at timestamptz")
-        conn.commit()
+        alerts_schema(conn)
         due = conn.execute("""
-            select a.lot_id, a.max_bid, l.url, l.close_time, l.watch_model,
+            select a.lot_id, a.max_bid, a.fair_max, a.tier, l.url, l.close_time, l.watch_model,
                    l.reference_number,
+                   (select s.reserve_met from bid_snapshots s
+                    where s.lot_id = a.lot_id and s.reserve_met is not null
+                    order by s.observed_at desc limit 1) as reserve_met,
                    (select s.current_bid from bid_snapshots s where s.lot_id = a.lot_id
                     order by s.observed_at desc limit 1) as bid,
                    (select s.observed_at from bid_snapshots s where s.lot_id = a.lot_id
@@ -1341,8 +1588,10 @@ def remind() -> None:
                 conn.commit()
                 log.info("alerted lot %s was removed from Catawiki — no reminder", r["lot_id"])
                 continue
+            reserve = r["reserve_met"]
             if r["lot_id"] in live:
-                bid, seen, close_utc = live[r["lot_id"]]
+                bid, seen, close_utc, live_reserve = live[r["lot_id"]]
+                reserve = live_reserve if live_reserve is not None else reserve
                 fresh = True
             else:
                 bid = float(r["bid"]) if r["bid"] is not None else 0.0
@@ -1359,6 +1608,11 @@ def remind() -> None:
             line = line_of(r["watch_model"])
             name = escape(" ".join(f"Omega {line if line != 'other' else ''} {ref}".split()))
             mx = float(r["max_bid"])
+            fm = float(r["fair_max"]) if r["fair_max"] is not None else None
+            which = "fair max" if r["tier"] == "fair" else "max"
+            offer = ("\nReserve not met: bid anyway — if it ends unsold with you on top, the "
+                     "seller can offer it to you. Accept only up to your max."
+                     if reserve_unmet(reserve) else "")
             link = f'<a href="{escape(r["url"], quote=True)}">Open on Catawiki</a>'
 
             if fresh:
@@ -1366,19 +1620,26 @@ def remind() -> None:
                     else f"as of {seen.tz_convert(tz):%H:%M}"
                 if bid < mx:
                     text = (f"⏰ <b>{name}</b> closes at {close:%H:%M} · in {mins} min\n"
-                            f"Bid {_eur(bid)} {when} — still under your max of <b>{_eur(mx)}</b>.\n"
-                            f"If you still like it, place your max bid now.\n{link}")
+                            f"Bid {_eur(bid)} {when} — still under your {which} of <b>{_eur(mx)}</b>.\n"
+                            f"If you still like it, place your max bid now.{offer}\n{link}")
+                elif fm is not None and bid < fm:
+                    text = (f"⚖️ <b>{name}</b> closes at {close:%H:%M} · in {mins} min\n"
+                            f"Bid {_eur(bid)} {when} — over your safe max of {_eur(mx)}, still under "
+                            f"the fair max of <b>{_eur(fm)}</b>.\n"
+                            f"Only if you would sell it yourself with no platform fee.{offer}\n{link}")
                 else:
                     text = (f"✋ <b>{name}</b> closes at {close:%H:%M}\n"
-                            f"Bid {_eur(bid)} {when} — already over your max of {_eur(mx)}. "
-                            f"Skip this one.")
+                            f"Bid {_eur(bid)} {when} — already over your {which} of "
+                            f"{_eur(max(mx, fm or 0))}. Skip this one.")
             else:
                 age = (f"at {seen.tz_convert(tz):%H:%M}, {int((now - seen).total_seconds() // 60)} min ago"
                        if seen is not None else "never")
                 text = (f"⏰ <b>{name}</b> closes at {close:%H:%M} · in {mins} min\n"
                         f"⚠️ Could not check the current bid. Last seen: {_eur(bid)} {age} — "
                         f"it has probably moved.\n"
-                        f"Your max is <b>{_eur(mx)}</b>. Open the lot and check before bidding.\n{link}")
+                        f"Your {which} is <b>{_eur(mx)}</b>"
+                        + (f" (fair max {_eur(fm)})" if fm is not None else "")
+                        + f". Open the lot and check before bidding.\n{link}")
 
             resp = requests.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
@@ -1410,7 +1671,8 @@ def countries() -> None:
 
 
 def run(send: bool = False) -> None:
-    out, stats = score()
+    with PIPELINE_LOCK:
+        out, stats = score()
     print_table(out, stats)
     if send:
         send_new(out)
